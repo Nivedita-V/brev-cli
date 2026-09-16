@@ -47,6 +47,8 @@ dist/
 brev-cli
 brev
 brev-local
+brev-linux-amd64
+brev-linux-arm64
 
 # golang executable 
 go1.*

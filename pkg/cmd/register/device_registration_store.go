@@ -20,7 +20,13 @@ const (
 	globalRegistrationDir = "/etc/brev"
 )
 
-var ErrRegistrationNotFound = breverrors.New("device registration not found, run 'brev register' first")
+var (
+	ErrRegistrationNotFound = breverrors.New("device registration not found, run 'brev register' first")
+	// ErrRegistrationInvalid classifies a record whose JSON or required fields are malformed.
+	ErrRegistrationInvalid = breverrors.New("device registration is malformed")
+	// ErrRegistrationStatusUnknown classifies a well-formed record with an unsupported status.
+	ErrRegistrationStatusUnknown = breverrors.New("device registration status is unknown")
+)
 
 const (
 	RegistrationStatusPending    = "pending"
@@ -112,14 +118,14 @@ func validateRegistration(reg *DeviceRegistration) error {
 	switch reg.Status {
 	case "", RegistrationStatusRegistered:
 		if reg.ExternalNodeID == "" || reg.OrgID == "" {
-			return breverrors.New("malformed registration, try registering")
+			return fmt.Errorf("malformed registration, try registering: %w", ErrRegistrationInvalid)
 		}
 	case RegistrationStatusPending:
 		if reg.OrgID == "" || reg.DeviceID == "" {
-			return breverrors.New("malformed registration, try re-registering")
+			return fmt.Errorf("malformed registration, try re-registering: %w", ErrRegistrationInvalid)
 		}
 	default:
-		return fmt.Errorf("unknown registration status %q, try re-registering", reg.Status)
+		return fmt.Errorf("unknown registration status %q, try re-registering: %w", reg.Status, ErrRegistrationStatusUnknown)
 	}
 	return nil
 }
@@ -135,6 +141,11 @@ func read(s *FileRegistrationStore) (*DeviceRegistration, error) {
 	}
 	var reg DeviceRegistration
 	if err := files.ReadJSON(files.AppFs, path, &reg); err != nil {
+		var syntaxErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+			return nil, fmt.Errorf("malformed registration, try re-registering: %w", ErrRegistrationInvalid)
+		}
 		return nil, breverrors.WrapAndTrace(err)
 	}
 	return &reg, nil

@@ -343,3 +343,15 @@ func Test_LoadAll_ValidateRegistrationStatusCases(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadAllClassifiesMalformedJSON(t *testing.T) {
+	cleanup := setupTestFs(t)
+	defer cleanup()
+	if err := afero.WriteFile(files.AppFs, globalRegistrationDir+"/"+registrationFileName, []byte(`{"status":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewFileRegistrationStore().LoadAll()
+	if !errors.Is(err, ErrRegistrationInvalid) {
+		t.Fatalf("LoadAll() error = %v, want ErrRegistrationInvalid", err)
+	}
+}

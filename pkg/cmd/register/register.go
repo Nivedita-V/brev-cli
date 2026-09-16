@@ -120,6 +120,7 @@ func NewCmdRegister(t *terminal.Terminal, store RegisterStore) *cobra.Command {
 	var sshPort int // deprecated
 	var approveFlag bool
 	var registrationTokenFlag string
+	var suggestedNameFlag string
 
 	cmd := &cobra.Command{
 		Annotations:           map[string]string{"configuration": ""},
@@ -130,20 +131,14 @@ func NewCmdRegister(t *terminal.Terminal, store RegisterStore) *cobra.Command {
 		Example:               registerExample,
 		Args:                  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			interactive := nameFlag == "" && orgFlag == "" && sshPort == 0
-			opts := registerOpts{
-				interactive:       interactive,
-				name:              nameFlag,
-				orgName:           orgFlag,
-				skipConfirm:       approveFlag,
-				registrationToken: registrationTokenFlag,
-			}
+			opts := resolveRegisterOptions(nameFlag, orgFlag, sshPort, approveFlag, registrationTokenFlag, suggestedNameFlag)
 			return runRegister(cmd.Context(), t, store, opts, defaultRegisterDeps())
 		},
 	}
 
 	cmd.Flags().StringVarP(&orgFlag, "org", "o", "", "organization name (required in non-interactive mode unless using API-key auth)")
 	cmd.Flags().StringVarP(&nameFlag, "name", "n", "", "device name (required when using non-interactive mode)")
+	cmd.Flags().StringVar(&suggestedNameFlag, "suggested-name", "", "editable initial device name for interactive registration")
 	cmd.Flags().IntVarP(&sshPort, "ssh-port", "p", 0, "SSH port (if ssh access is desired)")
 	cmd.Flags().BoolVar(&approveFlag, "approve", false, "skip all confirmation prompts (assume yes)")
 	cmd.Flags().StringVar(&registrationTokenFlag, "registration-token", "", "optional registration token passed to the register node API")
@@ -156,9 +151,21 @@ func NewCmdRegister(t *terminal.Terminal, store RegisterStore) *cobra.Command {
 type registerOpts struct {
 	interactive       bool
 	name              string
+	suggestedName     string
 	orgName           string
 	skipConfirm       bool
 	registrationToken string
+}
+
+func resolveRegisterOptions(name, org string, sshPort int, approve bool, registrationToken, suggestedName string) registerOpts {
+	return registerOpts{
+		interactive:       name == "" && org == "" && sshPort == 0,
+		name:              name,
+		suggestedName:     suggestedName,
+		orgName:           org,
+		skipConfirm:       approve,
+		registrationToken: registrationToken,
+	}
 }
 
 func runRegister(ctx context.Context, t *terminal.Terminal, s RegisterStore, opts registerOpts, deps registerDeps) error { //nolint:gocognit,gocyclo,funlen // ok
@@ -232,6 +239,7 @@ func runRegister(ctx context.Context, t *terminal.Terminal, s RegisterStore, opt
 			Label:      "Device name",
 			ErrorMsg:   "name is required",
 			AllowEmpty: false,
+			Default:    opts.suggestedName,
 		})
 		name = strings.TrimSpace(name)
 	} else {

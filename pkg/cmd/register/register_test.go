@@ -17,6 +17,7 @@ import (
 	"github.com/brevdev/brev-cli/pkg/externalnode"
 	"github.com/brevdev/brev-cli/pkg/sudo"
 	"github.com/brevdev/brev-cli/pkg/terminal"
+	"github.com/stretchr/testify/require"
 )
 
 // mockRegisterStore satisfies RegisterStore for orchestration tests.
@@ -113,6 +114,19 @@ func (m mockPlatform) IsCompatible() bool { return m.compatible }
 type mockConfirmer struct{ confirm bool }
 
 func (m mockConfirmer) ConfirmYesNo(_ string) bool { return m.confirm }
+
+func TestSuggestedNameRemainsInteractive(t *testing.T) {
+	opts := resolveRegisterOptions("", "", 0, false, "", "spark-alias")
+	require.True(t, opts.interactive)
+	require.Empty(t, opts.name)
+	require.Equal(t, "spark-alias", opts.suggestedName)
+}
+
+func TestSuggestedNameFlagIsDistinctFromName(t *testing.T) {
+	cmd := NewCmdRegister(terminal.New(), &mockRegisterStore{})
+	require.NotNil(t, cmd.Flags().Lookup("suggested-name"))
+	require.Contains(t, cmd.Flags().Lookup("suggested-name").Usage, "interactive")
+}
 
 // mockSelector implements terminal.Selector by returning the first item (for tests that need org selection).
 type mockSelector struct{ choice string }

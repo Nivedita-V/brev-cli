@@ -45,6 +45,7 @@ import (
 	"github.com/brevdev/brev-cli/pkg/cmd/redeem"
 	"github.com/brevdev/brev-cli/pkg/cmd/refresh"
 	"github.com/brevdev/brev-cli/pkg/cmd/register"
+	"github.com/brevdev/brev-cli/pkg/cmd/registration"
 	"github.com/brevdev/brev-cli/pkg/cmd/reset"
 	"github.com/brevdev/brev-cli/pkg/cmd/revokessh"
 	"github.com/brevdev/brev-cli/pkg/cmd/runtasks"
@@ -152,15 +153,19 @@ func NewBrevCommand() *cobra.Command { //nolint:funlen,gocognit,gocyclo // defin
       Find more information at:
             https://brev.nvidia.com`,
 		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
-			analytics.CaptureCommand("", cmd, args)
+			if cmd.Annotations["machine-output"] != "true" {
+				analytics.CaptureCommand("", cmd, args)
+			}
 			return nil
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			analytics.RecordCommandStart(cmd, args)
+			if cmd.Annotations["machine-output"] != "true" {
+				analytics.RecordCommandStart(cmd, args)
+			}
 			breverrors.GetDefaultErrorReporter().AddTag("command", cmd.Name())
 			// version info gets in the way of the output for
 			// configure-env-vars, since shells are going to eval it
-			if featureflag.ShowVersionOnRun() && !printVersion && cmd.Name() != "configure-env-vars" {
+			if featureflag.ShowVersionOnRun() && !printVersion && cmd.Name() != "configure-env-vars" && cmd.Annotations["machine-output"] != "true" {
 				v, err := remoteversion.BuildCheckLatestVersionString(t, noLoginCmdStore)
 				// todo this should not be fatal when it errors
 				if err != nil {
@@ -336,6 +341,7 @@ func createCmdTree(cmd *cobra.Command, t *terminal.Terminal, loginCmdStore *stor
 	cmd.AddCommand(refresh.NewCmdRefresh(t, loginCmdStore))
 	cmd.AddCommand(register.NewCmdRegister(t, externalNodeCmdStore))
 	cmd.AddCommand(deregister.NewCmdDeregister(t, externalNodeCmdStore))
+	cmd.AddCommand(registration.NewCmdRegistration(register.NewFileRegistrationStore()))
 	cmd.AddCommand(upgrade.NewCmdUpgrade(t, noLoginCmdStore))
 	cmd.AddCommand(enablessh.NewCmdEnableSSH(t, externalNodeCmdStore))
 	cmd.AddCommand(disablessh.NewCmdDisableSSH(t, externalNodeCmdStore))
