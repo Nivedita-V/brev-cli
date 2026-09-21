@@ -611,6 +611,7 @@ func TestSanitizeNodeName(t *testing.T) {
 func TestMakeSSHConfigEntryForNode(t *testing.T) {
 	entry := ExternalNodeSSHEntry{
 		Alias:    "my-gpu-box",
+		NodeID:   "node-123",
 		Hostname: "10.0.0.5",
 		Port:     41920,
 		User:     "ec2-user",
@@ -621,11 +622,13 @@ func TestMakeSSHConfigEntryForNode(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	want := `Host my-gpu-box
+	want := `# brev-external-node node_id=node-123 alias=my-gpu-box
+Host my-gpu-box
   HostName 10.0.0.5
   User ec2-user
   Port 41920
   IdentityFile "/home/test/.brev/brev.pem"
+  ProxyCommand none
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   ServerAliveInterval 30
@@ -655,6 +658,12 @@ func TestMakeSSHConfigEntryForNode_CertRequired(t *testing.T) {
 	if !strings.Contains(got, "Match host my-gpu-box exec ") {
 		t.Fatalf("expected Match block, got:\n%s", got)
 	}
+	if !strings.HasPrefix(got, "# brev-external-node node_id=node-abc alias=my-gpu-box\n") {
+		t.Fatalf("expected stable ownership marker, got:\n%s", got)
+	}
+	if strings.Count(got, "ProxyCommand none") != 2 {
+		t.Fatalf("expected proxy neutralization in Match and Host blocks, got:\n%s", got)
+	}
 	if !strings.Contains(got, "--node node-abc") {
 		t.Errorf("Match exec must use --node flag: %s", got)
 	}
@@ -680,7 +689,7 @@ func TestCreateNewSSHConfig_WithNodes(t *testing.T) {
 	c := NewSSHConfigurerV2(DummySSHConfigurerV2Store{})
 
 	nodes := []ExternalNodeSSHEntry{
-		{Alias: "gpu-box", Hostname: "10.0.0.5", Port: 41920, User: "ec2-user"},
+		{Alias: "gpu-box", NodeID: "node-gpu", Hostname: "10.0.0.5", Port: 41920, User: "ec2-user"},
 	}
 
 	cStr, err := c.CreateNewSSHConfig([]entity.Workspace{}, nodes)
@@ -689,11 +698,13 @@ func TestCreateNewSSHConfig_WithNodes(t *testing.T) {
 	}
 
 	want := `# included in /my/user/config
+# brev-external-node node_id=node-gpu alias=gpu-box
 Host gpu-box
   HostName 10.0.0.5
   User ec2-user
   Port 41920
   IdentityFile "/my/priv/key.pem"
+  ProxyCommand none
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   ServerAliveInterval 30

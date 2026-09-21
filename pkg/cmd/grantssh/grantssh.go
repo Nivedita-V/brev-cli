@@ -64,6 +64,8 @@ func NewCmdGrantSSH(t *terminal.Terminal, store GrantSSHStore) *cobra.Command {
 	var linuxUser string
 	var portIDFlag string
 	var approveFlag bool
+	var interactiveFlag bool
+	var selfFlag bool
 
 	cmd := &cobra.Command{
 		Annotations:           map[string]string{"configuration": ""},
@@ -73,9 +75,13 @@ func NewCmdGrantSSH(t *terminal.Terminal, store GrantSSHStore) *cobra.Command {
 		Long:                  "Grant SSH access to a node for another member of your organization. Interactive: no flags, prompts for org (unless API-key auth is active), node, port, user, and Linux user. Non-interactive: --node, --user, and --port-id are required; --org is also required unless API-key auth is active. The Linux user defaults to the current user and can be changed with --linux-user.",
 		Example:               "  brev grant-ssh\n  brev grant-ssh --org my-org --node my-node --user user@example.com --port-id port_abc --approve\n  brev grant-ssh --node my-node --user user@example.com --linux-user ubuntu --port-id port_abc --approve --api-key <api-key>",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			interactive := orgFlag == "" && nodeFlag == "" && userFlag == "" && linuxUser == "" && portIDFlag == ""
+			if err := validateGrantSSHMode(interactiveFlag, approveFlag, selfFlag); err != nil {
+				return err
+			}
+			interactive := interactiveFlag || (orgFlag == "" && nodeFlag == "" && userFlag == "" && linuxUser == "" && portIDFlag == "")
 			opts := grantSSHOpts{
 				interactive:   interactive,
+				grantSelf:     selfFlag,
 				orgName:       orgFlag,
 				nodeName:      nodeFlag,
 				userIDOrEmail: userFlag,
@@ -93,13 +99,29 @@ func NewCmdGrantSSH(t *terminal.Terminal, store GrantSSHStore) *cobra.Command {
 	cmd.Flags().StringVar(&linuxUser, "linux-user", "", "Linux username on the target node (defaults to the current user)")
 	cmd.Flags().StringVar(&portIDFlag, "port-id", "", "Brev port ID to grant access on (required in non-interactive mode)")
 	cmd.Flags().BoolVar(&approveFlag, "approve", false, "skip confirmation prompt (assume yes)")
+	cmd.Flags().BoolVar(&interactiveFlag, "interactive", false, "prompt for unspecified SSH access inputs")
+	cmd.Flags().BoolVar(&selfFlag, "self", false, "grant SSH access to the authenticated Brev user")
+	cmd.MarkFlagsMutuallyExclusive("user", "self")
 
 	return cmd
+}
+
+// validateGrantSSHMode rejects flag combinations that would bypass prompts or
+// make the selected Brev user ambiguous in explicit interactive mode.
+func validateGrantSSHMode(interactive, approve, grantSelf bool) error {
+	if interactive && approve {
+		return fmt.Errorf("--approve cannot be used with --interactive")
+	}
+	if grantSelf && !interactive {
+		return fmt.Errorf("--self requires --interactive")
+	}
+	return nil
 }
 
 // grantSSHOpts carries mode and inputs: when interactive, org/user/linuxUser from prompts; otherwise from flags.
 type grantSSHOpts struct {
 	interactive   bool
+	grantSelf     bool
 	orgName       string
 	nodeName      string
 	userIDOrEmail string
@@ -144,7 +166,7 @@ func runGrantSSH(ctx context.Context, t *terminal.Terminal, s GrantSSHStore, opt
 	client := deps.nodeClients.NewNodeClient(s, config.GlobalConfig.GetBrevPublicAPIURL())
 
 	var node *nodev1.ExternalNode
-	if opts.interactive {
+	if opts.interactive && opts.nodeName == "" {
 		resp, listErr := client.ListNodes(ctx, connect.NewRequest(&nodev1.ListNodesRequest{
 			OrganizationId: org.ID,
 			Options: &nodev1.ListNodesOptions{
@@ -165,10 +187,10 @@ func runGrantSSH(ctx context.Context, t *terminal.Terminal, s GrantSSHStore, opt
 	if err != nil {
 		return breverrors.WrapAndTrace(err)
 	}
-
-	orgMembers, err := getOrgMembers(ctx, t, s, org.ID)
-	if err != nil {
-		return err
+	if opts.nodeName != "" {
+		if err := requireExactNodeName(node, opts.nodeName); err != nil {
+			return err
+		}
 	}
 
 	brevPortID, portLabel, err := resolveGrantPort(ctx, t, opts, deps, node)
@@ -177,20 +199,31 @@ func runGrantSSH(ctx context.Context, t *terminal.Terminal, s GrantSSHStore, opt
 	}
 
 	var selectedUser *entity.User
-	if opts.interactive {
-		usersToSelect := make([]string, len(orgMembers))
-		for i, r := range orgMembers {
-			usersToSelect[i] = fmt.Sprintf("%s (%s)", r.user.Name, r.user.Email)
-		}
-		selected := deps.prompter.Select("Select a user to grant SSH access:", usersToSelect)
-		selectedUser, err = getSelectedUser(usersToSelect, selected, orgMembers)
+	if opts.grantSelf {
+		selectedUser, err = s.GetCurrentUser()
 		if err != nil {
-			return err
+			return breverrors.WrapAndTrace(err)
 		}
 	} else {
-		selectedUser, err = findUserByIDOrEmail(orgMembers, opts.userIDOrEmail)
-		if err != nil {
-			return err
+		orgMembers, membersErr := getOrgMembers(ctx, t, s, org.ID)
+		if membersErr != nil {
+			return membersErr
+		}
+		if opts.interactive {
+			usersToSelect := make([]string, len(orgMembers))
+			for i, r := range orgMembers {
+				usersToSelect[i] = fmt.Sprintf("%s (%s)", r.user.Name, r.user.Email)
+			}
+			selected := deps.prompter.Select("Select a user to grant SSH access:", usersToSelect)
+			selectedUser, err = getSelectedUser(usersToSelect, selected, orgMembers)
+			if err != nil {
+				return err
+			}
+		} else {
+			selectedUser, err = findUserByIDOrEmail(orgMembers, opts.userIDOrEmail)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -243,6 +276,15 @@ func runGrantSSH(ctx context.Context, t *terminal.Terminal, s GrantSSHStore, opt
 	t.Vprint("")
 	t.Vprint(t.Green(fmt.Sprintf("SSH access granted for %s. They can now SSH to this device via: brev shell %s", selectedUser.Name, node.GetName())))
 	t.Vprint("")
+	return nil
+}
+
+// requireExactNodeName prevents a case-insensitive backend lookup from binding
+// an interactive grant to a different display name than the requested alias.
+func requireExactNodeName(node *nodev1.ExternalNode, requested string) error {
+	if node == nil || node.GetName() != requested {
+		return fmt.Errorf("no exact node found with name %q", requested)
+	}
 	return nil
 }
 

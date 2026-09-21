@@ -116,7 +116,7 @@ type mockConfirmer struct{ confirm bool }
 func (m mockConfirmer) ConfirmYesNo(_ string) bool { return m.confirm }
 
 func TestSuggestedNameRemainsInteractive(t *testing.T) {
-	opts := resolveRegisterOptions("", "", 0, false, "", "spark-alias")
+	opts := resolveRegisterOptions("", "", 0, false, "", "spark-alias", "")
 	require.True(t, opts.interactive)
 	require.Empty(t, opts.name)
 	require.Equal(t, "spark-alias", opts.suggestedName)
@@ -126,6 +126,24 @@ func TestSuggestedNameFlagIsDistinctFromName(t *testing.T) {
 	cmd := NewCmdRegister(terminal.New(), &mockRegisterStore{})
 	require.NotNil(t, cmd.Flags().Lookup("suggested-name"))
 	require.Contains(t, cmd.Flags().Lookup("suggested-name").Usage, "interactive")
+}
+
+func TestFixedNamePreservesInteractiveRegistration(t *testing.T) {
+	opts := resolveRegisterOptions("", "", 0, false, "", "", "my-spark-mdns")
+
+	require.True(t, opts.interactive)
+	require.Equal(t, "my-spark-mdns", opts.fixedName)
+	require.Empty(t, opts.name)
+	require.Empty(t, opts.suggestedName)
+}
+
+func TestFixedNameRejectsConflictingNameInputs(t *testing.T) {
+	cmd := NewCmdRegister(terminal.New(), &mockRegisterStore{})
+	cmd.SetArgs([]string{"--fixed-name", "spark-a", "--name", "spark-b"})
+
+	err := cmd.Execute()
+
+	require.ErrorContains(t, err, "if any flags in the group")
 }
 
 // mockSelector implements terminal.Selector by returning the first item (for tests that need org selection).

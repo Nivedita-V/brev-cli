@@ -507,7 +507,7 @@ func Test_runGrantSSH_RPCFailure(t *testing.T) {
 	}
 }
 
-func Test_runGrantSSH_SelfGrantAllowed(t *testing.T) {
+func Test_runGrantSSH_InteractiveSelfLocksExactNodeAndCurrentUser(t *testing.T) {
 	regStore := &mockRegistrationStore{
 		reg: &register.DeviceRegistration{
 			ExternalNodeID: "unode_abc",
@@ -531,14 +531,18 @@ func Test_runGrantSSH_SelfGrantAllowed(t *testing.T) {
 	svc := &fakeNodeService{
 		listNodesFn: func(_ *nodev1.ListNodesRequest) (*nodev1.ListNodesResponse, error) {
 			return &nodev1.ListNodesResponse{
-				Items: []*nodev1.ExternalNode{{
-					ExternalNodeId: "unode_abc",
-					Name:           "My Spark",
-					Ports: []*nodev1.Port{{
-						PortId:     "port_ssh",
-						PortNumber: 22,
-					}},
-				}},
+				Items: []*nodev1.ExternalNode{
+					{
+						ExternalNodeId: "unode_other",
+						Name:           "Other Spark",
+						Ports:          []*nodev1.Port{{PortId: "port_other", PortNumber: 22}},
+					},
+					{
+						ExternalNodeId: "unode_abc",
+						Name:           "My Spark",
+						Ports:          []*nodev1.Port{{PortId: "port_ssh", PortNumber: 22}},
+					},
+				},
 			}, nil
 		},
 		grantSSHFn: func(req *nodev1.GrantNodeSSHAccessRequest) (*nodev1.GrantNodeSSHAccessResponse, error) {
@@ -550,7 +554,13 @@ func Test_runGrantSSH_SelfGrantAllowed(t *testing.T) {
 	defer server.Close()
 
 	term := terminal.New()
-	opts := grantSSHOpts{interactive: true, skipConfirm: true, linuxUser: "testuser", portID: "port_ssh"}
+	opts := grantSSHOpts{
+		interactive: true,
+		grantSelf:   true,
+		nodeName:    "My Spark",
+		skipConfirm: true,
+		linuxUser:   "testuser",
+	}
 	err := runGrantSSH(context.Background(), term, store, opts, deps)
 	if err != nil {
 		t.Fatalf("runGrantSSH failed: %v", err)
@@ -561,5 +571,24 @@ func Test_runGrantSSH_SelfGrantAllowed(t *testing.T) {
 	}
 	if gotGrantReq.GetUserId() != "user_1" {
 		t.Errorf("expected grant for current user, got %s", gotGrantReq.GetUserId())
+	}
+	if gotGrantReq.GetExternalNodeId() != "unode_abc" {
+		t.Errorf("expected exact node unode_abc, got %s", gotGrantReq.GetExternalNodeId())
+	}
+}
+
+func TestValidateGrantSSHModeRejectsApproveForExplicitInteractive(t *testing.T) {
+	err := validateGrantSSHMode(true, true, true)
+
+	if err == nil || !strings.Contains(err.Error(), "--approve cannot be used with --interactive") {
+		t.Fatalf("expected interactive approve rejection, got %v", err)
+	}
+}
+
+func TestRequireExactNodeNameRejectsCaseInsensitiveMatch(t *testing.T) {
+	err := requireExactNodeName(&nodev1.ExternalNode{Name: "My Spark"}, "my spark")
+
+	if err == nil || !strings.Contains(err.Error(), "exact node") {
+		t.Fatalf("expected exact-name rejection, got %v", err)
 	}
 }

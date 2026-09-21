@@ -35,6 +35,7 @@ import (
 	"github.com/brevdev/brev-cli/pkg/cmd/ls"
 	"github.com/brevdev/brev-cli/pkg/cmd/mintcert"
 	"github.com/brevdev/brev-cli/pkg/cmd/notebook"
+	nvsynccmd "github.com/brevdev/brev-cli/pkg/cmd/nvsync"
 	"github.com/brevdev/brev-cli/pkg/cmd/ollama"
 	"github.com/brevdev/brev-cli/pkg/cmd/open"
 	"github.com/brevdev/brev-cli/pkg/cmd/org"
@@ -342,6 +343,7 @@ func createCmdTree(cmd *cobra.Command, t *terminal.Terminal, loginCmdStore *stor
 	cmd.AddCommand(register.NewCmdRegister(t, externalNodeCmdStore))
 	cmd.AddCommand(deregister.NewCmdDeregister(t, externalNodeCmdStore))
 	cmd.AddCommand(registration.NewCmdRegistration(register.NewFileRegistrationStore()))
+	cmd.AddCommand(nvsynccmd.NewCmdNVSYNC(externalNodeCmdStore))
 	cmd.AddCommand(upgrade.NewCmdUpgrade(t, noLoginCmdStore))
 	cmd.AddCommand(enablessh.NewCmdEnableSSH(t, externalNodeCmdStore))
 	cmd.AddCommand(disablessh.NewCmdDisableSSH(t, externalNodeCmdStore))

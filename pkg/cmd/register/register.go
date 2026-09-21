@@ -121,6 +121,7 @@ func NewCmdRegister(t *terminal.Terminal, store RegisterStore) *cobra.Command {
 	var approveFlag bool
 	var registrationTokenFlag string
 	var suggestedNameFlag string
+	var fixedNameFlag string
 
 	cmd := &cobra.Command{
 		Annotations:           map[string]string{"configuration": ""},
@@ -131,7 +132,7 @@ func NewCmdRegister(t *terminal.Terminal, store RegisterStore) *cobra.Command {
 		Example:               registerExample,
 		Args:                  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			opts := resolveRegisterOptions(nameFlag, orgFlag, sshPort, approveFlag, registrationTokenFlag, suggestedNameFlag)
+			opts := resolveRegisterOptions(nameFlag, orgFlag, sshPort, approveFlag, registrationTokenFlag, suggestedNameFlag, fixedNameFlag)
 			return runRegister(cmd.Context(), t, store, opts, defaultRegisterDeps())
 		},
 	}
@@ -139,29 +140,34 @@ func NewCmdRegister(t *terminal.Terminal, store RegisterStore) *cobra.Command {
 	cmd.Flags().StringVarP(&orgFlag, "org", "o", "", "organization name (required in non-interactive mode unless using API-key auth)")
 	cmd.Flags().StringVarP(&nameFlag, "name", "n", "", "device name (required when using non-interactive mode)")
 	cmd.Flags().StringVar(&suggestedNameFlag, "suggested-name", "", "editable initial device name for interactive registration")
+	cmd.Flags().StringVar(&fixedNameFlag, "fixed-name", "", "use this exact device name while keeping registration interactive")
 	cmd.Flags().IntVarP(&sshPort, "ssh-port", "p", 0, "SSH port (if ssh access is desired)")
 	cmd.Flags().BoolVar(&approveFlag, "approve", false, "skip all confirmation prompts (assume yes)")
 	cmd.Flags().StringVar(&registrationTokenFlag, "registration-token", "", "optional registration token passed to the register node API")
 	_ = cmd.Flags().MarkDeprecated("ssh-port", "use 'brev enable-ssh' after registration to enable SSH access")
+	cmd.MarkFlagsMutuallyExclusive("name", "suggested-name", "fixed-name")
 
 	return cmd
 }
 
-// registerOpts carries mode and inputs: when interactive, name/orgName are from prompts; otherwise from flags.
+// registerOpts carries mode and inputs: fixedName locks only the name while
+// preserving the remaining interactive registration flow.
 type registerOpts struct {
 	interactive       bool
 	name              string
 	suggestedName     string
+	fixedName         string
 	orgName           string
 	skipConfirm       bool
 	registrationToken string
 }
 
-func resolveRegisterOptions(name, org string, sshPort int, approve bool, registrationToken, suggestedName string) registerOpts {
+func resolveRegisterOptions(name, org string, sshPort int, approve bool, registrationToken, suggestedName, fixedName string) registerOpts {
 	return registerOpts{
-		interactive:       name == "" && org == "" && sshPort == 0,
+		interactive:       fixedName != "" || (name == "" && org == "" && sshPort == 0),
 		name:              name,
 		suggestedName:     suggestedName,
+		fixedName:         fixedName,
 		orgName:           org,
 		skipConfirm:       approve,
 		registrationToken: registrationToken,
@@ -233,7 +239,9 @@ func runRegister(ctx context.Context, t *terminal.Terminal, s RegisterStore, opt
 	}
 
 	var name string
-	if opts.interactive {
+	if opts.fixedName != "" {
+		name = opts.fixedName
+	} else if opts.interactive {
 		t.Vprint("")
 		name = terminal.PromptGetInput(terminal.PromptContent{
 			Label:      "Device name",

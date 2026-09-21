@@ -59,6 +59,7 @@ const SSHConfigEntryTemplateNode = `Host {{ .Alias }}
   User {{ .User }}
   Port {{ .Port }}
   IdentityFile {{ .IdentityFile }}
+  ProxyCommand none
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   ServerAliveInterval 30
@@ -71,6 +72,7 @@ const SSHCertRequiredTemplateNode = `Match host {{ .Alias }} exec {{ .ExecComman
   User {{ .User }}
   Port {{ .Port }}
   IdentityFile {{ .IdentityFile }}
+  ProxyCommand none
   IdentitiesOnly yes
   PasswordAuthentication no
   AddKeysToAgent yes
@@ -91,6 +93,7 @@ type externalNodeSSHConfigEntry struct {
 }
 
 func makeSSHConfigEntryForNode(node ExternalNodeSSHEntry, privateKeyPath string, certRequired bool, brevDir string) (string, error) {
+	ownershipMarker := fmt.Sprintf("# brev-external-node node_id=%s alias=%s\n", node.NodeID, node.Alias)
 	hostEntry := externalNodeSSHConfigEntry{
 		Alias:        node.Alias,
 		Hostname:     node.Hostname,
@@ -125,10 +128,10 @@ func makeSSHConfigEntryForNode(node ExternalNodeSSHEntry, privateKeyPath string,
 		if err != nil {
 			return "", breverrors.WrapAndTrace(err)
 		}
-		return certVal + hostVal, nil
+		return ownershipMarker + certVal + hostVal, nil
 	}
 
-	return hostVal, nil
+	return ownershipMarker + hostVal, nil
 }
 
 type ConfigUpdaterStore interface {
