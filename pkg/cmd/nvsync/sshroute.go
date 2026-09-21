@@ -37,6 +37,8 @@ type routeDependencies struct {
 	prepare    func(context.Context, string, string) error
 	refresh    func() error
 	readConfig func() (string, error)
+	configPath func() (string, error)
+	execProxy  func(string, []string, []string) error
 }
 
 // NewCmdNVSYNC returns Brev's hidden NVIDIA Sync integration command tree.
@@ -78,6 +80,8 @@ func newRouteDependencies(store routeStore) routeDependencies {
 			}
 			return store.GetFileAsString(path)
 		},
+		configPath: store.GetBrevSSHConfigPath,
+		execProxy:  execProxyProcess,
 	}
 }
 
@@ -96,6 +100,7 @@ func newCmdNVSYNC(deps routeDependencies) *cobra.Command {
 	sshRoute.AddCommand(newRouteActionCommand("configure", deps))
 	sshRoute.AddCommand(newRouteActionCommand("status", deps))
 	sshRoute.AddCommand(newRouteActionCommand("remove", deps))
+	sshRoute.AddCommand(newRouteProxyCommand(deps))
 	cmd.AddCommand(sshRoute)
 	return cmd
 }
