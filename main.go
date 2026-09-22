@@ -19,6 +19,6 @@ func main() {
 		analytics.CaptureCommandError()
 		cmderrors.DisplayAndHandleError(err)
 		done()
-		os.Exit(1) //nolint:gocritic // manually call done
+		os.Exit(cmderrors.ExitCode(err)) //nolint:gocritic // manually call done
 	}
 }

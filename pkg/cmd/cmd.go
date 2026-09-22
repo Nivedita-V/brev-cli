@@ -343,7 +343,7 @@ func createCmdTree(cmd *cobra.Command, t *terminal.Terminal, loginCmdStore *stor
 	cmd.AddCommand(register.NewCmdRegister(t, externalNodeCmdStore))
 	cmd.AddCommand(deregister.NewCmdDeregister(t, externalNodeCmdStore))
 	cmd.AddCommand(registration.NewCmdRegistration(register.NewFileRegistrationStore()))
-	cmd.AddCommand(nvsynccmd.NewCmdNVSYNC(externalNodeCmdStore))
+	cmd.AddCommand(nvsynccmd.NewCmdNVSYNC(t, externalNodeCmdStore))
 	cmd.AddCommand(upgrade.NewCmdUpgrade(t, noLoginCmdStore))
 	cmd.AddCommand(enablessh.NewCmdEnableSSH(t, externalNodeCmdStore))
 	cmd.AddCommand(disablessh.NewCmdDisableSSH(t, externalNodeCmdStore))

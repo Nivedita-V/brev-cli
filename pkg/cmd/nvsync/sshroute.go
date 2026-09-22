@@ -12,6 +12,7 @@ import (
 	"github.com/brevdev/brev-cli/pkg/cmd/refresh"
 	"github.com/brevdev/brev-cli/pkg/cmd/util"
 	"github.com/brevdev/brev-cli/pkg/ssh"
+	"github.com/brevdev/brev-cli/pkg/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -41,9 +42,13 @@ type routeDependencies struct {
 	execProxy  func(string, []string, []string) error
 }
 
-// NewCmdNVSYNC returns Brev's hidden NVIDIA Sync integration command tree.
-func NewCmdNVSYNC(store routeStore) *cobra.Command {
-	return newCmdNVSYNC(newRouteDependencies(store))
+// NewCmdNVSYNC returns Brev's hidden NVIDIA Sync integration command tree,
+// including interactive setup sequences that reuse per-process authentication.
+func NewCmdNVSYNC(t *terminal.Terminal, store setupStore) *cobra.Command {
+	cmd := newCmdNVSYNC(newRouteDependencies(store))
+	setup := newSetupDependencies(t, store)
+	cmd.AddCommand(newSetupTargetCommand(setup), newSetupHostCommand(setup))
+	return cmd
 }
 
 func newRouteDependencies(store routeStore) routeDependencies {

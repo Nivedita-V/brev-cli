@@ -86,6 +86,19 @@ func DisplayAndHandleError(err error) {
 	}
 }
 
+// ExitCode returns a command-provided stable exit code or the CLI's default
+// failure code when the error does not define one.
+func ExitCode(err error) int {
+	var coded interface{ ExitCode() int }
+	if stderrors.As(err, &coded) {
+		code := coded.ExitCode()
+		if code > 0 && code <= 255 {
+			return code
+		}
+	}
+	return 1
+}
+
 func isSneakyValidationErr(err error) bool {
 	return strings.Contains(err.Error(), "unknown flag:") || strings.Contains(err.Error(), "unknown command")
 }
