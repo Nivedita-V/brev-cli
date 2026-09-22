@@ -5,8 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 type setupCall struct {
@@ -18,6 +22,29 @@ func recordingSetupStage(calls *[]setupCall, stage string, result error) setupSt
 	return func(_ context.Context, _ io.Reader, _ io.Writer, _ io.Writer, args []string) error {
 		*calls = append(*calls, setupCall{stage: stage, args: append([]string(nil), args...)})
 		return result
+	}
+}
+
+func TestEmbeddedCommandStageTreatsNilStageArgumentsAsExplicitlyEmpty(t *testing.T) {
+	originalArgs := os.Args
+	os.Args = []string{"brev", "--alias", "my-spark-mdns"}
+	t.Cleanup(func() { os.Args = originalArgs })
+
+	ran := false
+	stage := embeddedCommandStage(func() *cobra.Command {
+		return &cobra.Command{
+			Use:  "enable-ssh",
+			Args: cobra.NoArgs,
+			Run:  func(*cobra.Command, []string) { ran = true },
+		}
+	})
+
+	err := stage(t.Context(), strings.NewReader(""), io.Discard, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("embedded stage inherited process arguments: %v", err)
+	}
+	if !ran {
+		t.Fatal("embedded stage did not run")
 	}
 }
 

@@ -85,6 +85,9 @@ func embeddedCommandStage(factory func() *cobra.Command) setupStage {
 		cmd.SetIn(stdin)
 		cmd.SetOut(stdout)
 		cmd.SetErr(stderr)
+		if args == nil {
+			args = []string{}
+		}
 		cmd.SetArgs(args)
 		return cmd.ExecuteContext(ctx)
 	}
