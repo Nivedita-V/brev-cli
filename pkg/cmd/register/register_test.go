@@ -7,10 +7,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	nodev1connect "buf.build/gen/go/brevdev/devplane/connectrpc/go/devplaneapi/v1/devplaneapiv1connect"
 	nodev1 "buf.build/gen/go/brevdev/devplane/protocolbuffers/go/devplaneapi/v1"
 	"connectrpc.com/connect"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/brevdev/brev-cli/pkg/auth"
 	"github.com/brevdev/brev-cli/pkg/entity"
@@ -131,11 +134,23 @@ func (m mockSelector) Select(_ string, items []string) string {
 	return ""
 }
 
-type mockNetBirdManager struct{ err error }
+type mockNetBirdManager struct {
+	err error
+	// disconnected makes Status report a tunnel that never comes up. The zero
+	// value reports a connected tunnel so the happy path needs no setup.
+	disconnected bool
+}
 
 func (m mockNetBirdManager) Install() error       { return m.err }
 func (m mockNetBirdManager) Uninstall() error     { return m.err }
 func (m mockNetBirdManager) EnsureRunning() error { return m.err }
+
+func (m mockNetBirdManager) Status() (bool, error) {
+	if m.err != nil {
+		return false, m.err
+	}
+	return !m.disconnected, nil
+}
 
 type mockSetupRunner struct {
 	called bool
@@ -246,6 +261,42 @@ func okAddNodeFn(captured *[]string) func(*nodev1.AddNodeRequest) (*nodev1.AddNo
 			},
 		}, nil
 	}
+}
+
+// A registration whose tunnel never connects must not report success: the node
+// is registered but the command exits non-zero.
+func Test_runRegister_TunnelNeverConnectsFails(t *testing.T) {
+	originalTimeout, originalInterval := tunnelReadyTimeout, tunnelReadyInterval
+	tunnelReadyTimeout, tunnelReadyInterval = 20*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { tunnelReadyTimeout, tunnelReadyInterval = originalTimeout, originalInterval })
+
+	regStore := &mockRegistrationStore{}
+	deps, server := testRegisterDeps(t, &fakeNodeService{addNodeFn: okAddNodeFn(nil)}, regStore)
+	defer server.Close()
+	deps.netbird = mockNetBirdManager{disconnected: true}
+
+	err := runRegister(context.Background(), terminal.New(), testRegisterStore(),
+		registerOpts{interactive: false, name: "my-spark", orgName: "TestOrg"}, deps)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tunnel is not connected")
+	// The node itself was registered and stored locally, so a re-run can resume.
+	reg, loadErr := regStore.LoadAll()
+	require.NoError(t, loadErr)
+	assert.Equal(t, RegistrationStatusRegistered, reg.Status)
+}
+
+// A tunnel status read failure surfaces instead of being ignored.
+func Test_runRegister_TunnelStatusErrorFails(t *testing.T) {
+	deps, server := testRegisterDeps(t, &fakeNodeService{addNodeFn: okAddNodeFn(nil)}, &mockRegistrationStore{})
+	defer server.Close()
+	deps.netbird = mockNetBirdManager{err: errors.New("netbird: command not found")}
+
+	err := runRegister(context.Background(), terminal.New(), testRegisterStore(),
+		registerOpts{interactive: false, name: "my-spark", orgName: "TestOrg"}, deps)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "command not found")
 }
 
 // runRegisterCase absorbs scaffolding tests repeat: deps, server
@@ -551,8 +602,13 @@ func Test_runRegister_NoSetupCommand(t *testing.T) {
 	term := terminal.New()
 	opts := registerOpts{interactive: false, name: "my-spark", orgName: "TestOrg"}
 	err := runRegister(context.Background(), term, store, opts, deps)
-	if err != nil {
-		t.Fatalf("runRegister failed: %v", err)
+	// Without a setup command the tunnel can never connect, so registration is
+	// incomplete and the command must fail rather than report success.
+	if err == nil {
+		t.Fatal("expected an error when no setup command is returned")
+	}
+	if !strings.Contains(err.Error(), "tunnel") {
+		t.Errorf("expected tunnel-related error, got: %v", err)
 	}
 
 	if setupRunner.called {

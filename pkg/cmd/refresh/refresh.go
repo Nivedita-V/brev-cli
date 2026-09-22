@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"sync"
 
 	nodev1 "buf.build/gen/go/brevdev/devplane/protocolbuffers/go/devplaneapi/v1"
@@ -132,24 +133,55 @@ func GetConfigUpdater(store RefreshStore) (*ssh.ConfigUpdater, error) {
 		return nil, breverrors.WrapAndTrace(err)
 	}
 
-	cu := ssh.NewConfigUpdater(workspaceSSHStore{RefreshStore: store}, configs, keys.PrivateKey)
-	cu.ExternalNodes = getExternalNodeSSHEntries(store)
+	// Resolve the active org and current user once for the whole refresh. Every
+	// consumer below (external-node entries, per-workspace SSH enrichment) needs
+	// the same two values, and each lookup is a network round trip.
+	identity := resolveRefreshIdentity(store)
+
+	cu := ssh.NewConfigUpdater(
+		workspaceSSHStore{RefreshStore: store, user: identity.user},
+		configs,
+		keys.PrivateKey,
+	)
+	cu.ExternalNodes = getExternalNodeSSHEntries(store, identity)
 
 	return cu, nil
 }
 
-// getExternalNodeSSHEntries fetches external nodes and resolves their SSH details.
-// This is best-effort: if anything fails, it returns nil so workspace SSH config is unaffected.
-func getExternalNodeSSHEntries(store RefreshStore) []ssh.ExternalNodeSSHEntry {
+// refreshIdentity is the per-refresh identity: the active organization and the
+// current user, resolved once and shared by every step.
+type refreshIdentity struct {
+	org  *entity.Organization
+	user *entity.User
+}
+
+// resolveRefreshIdentity best-effort resolves the org and user. Missing values
+// degrade the same way as before: a nil org or user just means the steps that
+// need them are skipped.
+func resolveRefreshIdentity(store RefreshStore) refreshIdentity {
+	var identity refreshIdentity
 	org, err := store.GetActiveOrganizationOrDefault()
 	if err != nil {
-		return nil
+		log.Printf("refresh: could not resolve active organization: %v", err)
+	} else {
+		identity.org = org
 	}
-
 	user, err := store.GetCurrentUser()
 	if err != nil {
+		log.Printf("refresh: could not resolve current user: %v", err)
+	} else {
+		identity.user = user
+	}
+	return identity
+}
+
+// getExternalNodeSSHEntries fetches external nodes and resolves their SSH details.
+// This is best-effort: if anything fails, it returns nil so workspace SSH config is unaffected.
+func getExternalNodeSSHEntries(store RefreshStore, identity refreshIdentity) []ssh.ExternalNodeSSHEntry {
+	if identity.org == nil || identity.user == nil {
 		return nil
 	}
+	org, user := identity.org, identity.user
 
 	client := register.NewNodeServiceClient(store, config.GlobalConfig.GetBrevPublicAPIURL())
 	resp, err := client.ListNodes(context.Background(), connect.NewRequest(&nodev1.ListNodesRequest{

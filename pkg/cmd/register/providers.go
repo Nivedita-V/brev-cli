@@ -68,13 +68,13 @@ func (Netbird) EnsureRunning() error {
 		}
 	}
 
-	statusOut, err := exec.Command("netbird", "status").Output() //nolint:gosec // fixed command
+	statusOut, err := netbirdStatusOutput(false)
 	if err != nil {
 		// Service is running, just can't confirm peer status.
 		return nil
 	}
 
-	if netbirdManagementConnected(string(statusOut)) {
+	if netbirdManagementConnected(statusOut) {
 		return nil
 	}
 
@@ -82,6 +82,22 @@ func (Netbird) EnsureRunning() error {
 		return fmt.Errorf("failed to reconnect Brev tunnel: %w", upErr)
 	}
 	return nil
+}
+
+// Status reports whether the local Brev tunnel has an established connection to
+// its management server. This is the same signal dev-plane uses to consider a
+// node connected, read locally so readiness does not depend on a network round
+// trip.
+func (Netbird) Status() (bool, error) {
+	statusOut, err := netbirdStatusOutput(false)
+	if err != nil {
+		// The daemon socket is root-owned on some installs.
+		if sudoOut, sudoErr := netbirdStatusOutput(true); sudoErr == nil {
+			return netbirdManagementConnected(sudoOut), nil
+		}
+		return false, err
+	}
+	return netbirdManagementConnected(statusOut), nil
 }
 
 // ShellSetupRunner runs setup scripts via shell.

@@ -94,16 +94,17 @@ func runShellCommand(t *terminal.Terminal, sstore ShellStore, workspaceNameOrID 
 	workspace := target.Workspace
 
 	if workspace.Status == "STOPPED" { // we start the env for the user
-		err = util.StartWorkspaceIfStopped(t, s, sstore, workspaceNameOrID, workspace, pollTimeout)
+		workspace, err = util.StartWorkspaceIfStopped(t, s, sstore, workspaceNameOrID, workspace, pollTimeout)
 		if err != nil {
 			return breverrors.WrapAndTrace(err)
 		}
-	}
-	if workspace.Status != "RUNNING" {
+	} else if workspace.Status != "RUNNING" {
+		// Starting already waited for RUNNING and returned the refreshed
+		// instance, so this only runs for instances that were mid-boot.
 		err = util.PollUntil(s, workspace.ID, "RUNNING", sstore, " waiting for instance to be ready...", pollTimeout)
-	}
-	if err != nil {
-		return breverrors.WrapAndTrace(err)
+		if err != nil {
+			return breverrors.WrapAndTrace(err)
+		}
 	}
 
 	localIdentifier := workspace.GetLocalIdentifier()

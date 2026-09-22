@@ -35,37 +35,41 @@ type WorkspaceStartStore interface {
 	StartWorkspace(workspaceID string) (*entity.Workspace, error)
 }
 
+// pollInterval is how long PollUntil waits between status checks.
+const pollInterval = 5 * time.Second
+
 // PollUntil polls the workspace status until it matches the desired state or times out
 func PollUntil(s *spinner.Spinner, wsid string, state string, pollingStore WorkspacePollingStore, waitMsg string, timeout time.Duration) error {
 	s.Suffix = waitMsg
 	s.Start()
+	defer s.Stop()
 	deadline := time.Now().Add(timeout)
 	for {
-		if time.Now().After(deadline) {
-			s.Stop()
-			return breverrors.WrapAndTrace(fmt.Errorf("timed out waiting for instance to reach %s state after %v", state, timeout))
-		}
-		time.Sleep(5 * time.Second)
+		// Check before sleeping so an instance already in the target state
+		// returns immediately instead of waiting out one poll interval.
 		ws, err := pollingStore.GetWorkspace(wsid)
 		if err != nil {
-			s.Stop()
 			return breverrors.WrapAndTrace(err)
 		}
-		s.Suffix = waitMsg
 		if ws.Status == state {
-			s.Stop()
 			return nil
 		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return breverrors.WrapAndTrace(fmt.Errorf("timed out waiting for instance to reach %s state after %v", state, timeout))
+		}
+		s.Suffix = waitMsg
+		// Never sleep past the deadline, so timeouts are reported on time.
+		time.Sleep(min(remaining, pollInterval))
 	}
 }
 
 // WaitForSSHToBeAvailable polls until an SSH connection can be established
 func WaitForSSHToBeAvailable(sshAlias string, s *spinner.Spinner) error {
-	counter := 0
 	s.Suffix = " waiting for SSH connection to be available"
 	s.Start()
-	for {
-		attempt := counter + 1
+	defer s.Stop()
+	for attempt := 1; ; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), sshAvailabilityAttemptTimeout)
 		cmd := exec.CommandContext(ctx, "ssh",
 			"-T",
@@ -83,7 +87,6 @@ func WaitForSSHToBeAvailable(sshAlias string, s *spinner.Spinner) error {
 		timedOut := ctx.Err() == context.DeadlineExceeded
 		cancel()
 		if err == nil {
-			s.Stop()
 			return nil
 		}
 
@@ -94,41 +97,46 @@ func WaitForSSHToBeAvailable(sshAlias string, s *spinner.Spinner) error {
 			stdErr = err.Error()
 		}
 
-		if counter == sshAvailabilityMaxAttempts || (!timedOut && !store.SatisfactorySSHErrMessage(stdErr)) {
-			s.Stop()
+		// A failure that will not resolve by waiting (bad credentials, host key
+		// mismatch) fails immediately; otherwise keep trying up to the budget.
+		if !timedOut && !store.SatisfactorySSHErrMessage(stdErr) {
 			return breverrors.WrapAndTrace(errors.New("\n" + stdErr))
+		}
+		if attempt >= sshAvailabilityMaxAttempts {
+			return breverrors.WrapAndTrace(fmt.Errorf(
+				"SSH to %s was not available after %d attempts: %s", sshAlias, attempt, stdErr))
 		}
 
 		s.Stop()
 		_, _ = fmt.Fprintf(s.Writer, "still waiting for SSH connection (attempt %d failed; retrying)\n", attempt)
-		counter++
 		time.Sleep(sshAvailabilityRetrySleep)
 		s.Start()
 	}
 }
 
-// StartWorkspaceIfStopped starts a workspace and waits for it to be running
-func StartWorkspaceIfStopped(t *terminal.Terminal, s *spinner.Spinner, tstore WorkspaceStartStore, wsIDOrName string, workspace *entity.Workspace, timeout time.Duration) error {
+// StartWorkspaceIfStopped starts a workspace and waits for it to be running,
+// returning the refreshed workspace so callers neither re-fetch nor re-poll it.
+func StartWorkspaceIfStopped(t *terminal.Terminal, s *spinner.Spinner, tstore WorkspaceStartStore, wsIDOrName string, workspace *entity.Workspace, timeout time.Duration) (*entity.Workspace, error) {
 	activeOrg, err := tstore.GetActiveOrganizationOrDefault()
 	if err != nil {
-		return breverrors.WrapAndTrace(err)
+		return nil, breverrors.WrapAndTrace(err)
 	}
 	workspaces, err := tstore.GetWorkspaceByNameOrID(activeOrg.ID, wsIDOrName)
 	if err != nil {
-		return breverrors.WrapAndTrace(err)
+		return nil, breverrors.WrapAndTrace(err)
 	}
 	startedWorkspace, err := tstore.StartWorkspace(workspaces[0].ID)
 	if err != nil {
-		return breverrors.WrapAndTrace(err)
+		return nil, breverrors.WrapAndTrace(err)
 	}
 	t.Vprintf("%s", t.Yellow("Instance %s is starting. \n\n", startedWorkspace.Name))
 	err = PollUntil(s, workspace.ID, entity.Running, tstore, " hang tight 🤙", timeout)
 	if err != nil {
-		return breverrors.WrapAndTrace(err)
+		return nil, breverrors.WrapAndTrace(err)
 	}
-	_, err = GetUserWorkspaceByNameOrIDErr(tstore, wsIDOrName)
+	refreshed, err := GetUserWorkspaceByNameOrIDErr(tstore, wsIDOrName)
 	if err != nil {
-		return breverrors.WrapAndTrace(err)
+		return nil, breverrors.WrapAndTrace(err)
 	}
-	return nil
+	return refreshed, nil
 }

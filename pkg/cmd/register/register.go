@@ -44,6 +44,9 @@ type NetBirdManager interface {
 	// connected, starting or reconnecting it if needed. Returns nil when
 	// the tunnel is healthy.
 	EnsureRunning() error
+	// Status reports whether the tunnel currently has an established
+	// connection to its management server.
+	Status() (bool, error)
 }
 
 // SetupRunner runs a setup script on the local machine.
@@ -372,9 +375,22 @@ func runRegisterSteps(ctx context.Context, t *terminal.Terminal, s RegisterStore
 
 	t.Vprint("")
 	t.Vprint(t.Yellow("[Step 5/5] Connecting device to Brev..."))
-	runSetup(node, t, deps)
+	setupErr := runSetup(node, t, deps)
 
 	t.Vprintf("%s  Node registered.\n", t.Green("  ✓"))
+
+	if setupErr != nil {
+		// The node exists on Brev and locally, but the tunnel is not up: say so
+		// plainly and exit non-zero instead of claiming success.
+		t.Vprint("")
+		t.Vprintf("  %s\n", t.Yellow("Registration incomplete: "+setupErr.Error()))
+		t.Vprint("  The device is registered with Brev, but the tunnel is not connected yet.")
+		t.Vprint("")
+		t.Vprintf("  %s\n", t.Yellow("Re-run 'brev register' to retry the tunnel setup."))
+		return breverrors.NewValidationError(fmt.Sprintf(
+			"device registered but the Brev tunnel is not connected: %v", setupErr))
+	}
+
 	t.Vprintf("%s  Registration complete.\n", t.Green("  ✓"))
 
 	t.Vprint("")
@@ -483,18 +499,54 @@ func netbirdManagementConnected(statusOutput string) bool {
 	return false
 }
 
-func runSetup(node *nodev1.ExternalNode, t *terminal.Terminal, deps registerDeps) {
+// runSetup connects the device to Brev and waits for the local tunnel to report
+// connected. It returns an error when the tunnel never comes up, so a
+// registration that did not finish cannot look successful.
+func runSetup(node *nodev1.ExternalNode, t *terminal.Terminal, deps registerDeps) error {
 	ci := node.GetConnectivityInfo()
 	if ci == nil || ci.GetRegistrationCommand() == "" {
-		t.Vprintf("  %s\n", t.Yellow("Warning: Brev tunnel setup failed, please try again."))
-	} else {
-		if err := deps.setupRunner.RunSetup(ci.GetRegistrationCommand()); err != nil {
-			t.Vprintf("  Warning: setup command failed: %v\n", err)
-		} else {
-			// netbird up reconfigures network routes; give them a moment
-			// to settle before making further RPC calls.
-			time.Sleep(2 * time.Second)
+		return errors.New("Brev returned no tunnel setup command")
+	}
+
+	if err := deps.setupRunner.RunSetup(ci.GetRegistrationCommand()); err != nil {
+		return fmt.Errorf("tunnel setup command failed: %w", err)
+	}
+
+	// The setup command starts the tunnel; wait for the local agent to report
+	// connected rather than sleeping and hoping.
+	t.Vprint("  Waiting for the Brev tunnel to connect...")
+	if err := waitForTunnel(deps); err != nil {
+		return err
+	}
+	t.Vprintf("%s  Brev tunnel connected.\n", t.Green("  ✓"))
+	return nil
+}
+
+var (
+	// tunnelReadyTimeout bounds how long register waits for the local tunnel to
+	// report a connected management session.
+	tunnelReadyTimeout = 15 * time.Second
+	// tunnelReadyInterval is the delay between tunnel status checks.
+	tunnelReadyInterval = time.Second
+)
+
+// waitForTunnel polls the local netbird agent until it reports a connected
+// management session, which is the same signal dev-plane uses to consider a
+// node connected.
+func waitForTunnel(deps registerDeps) error {
+	deadline := time.Now().Add(tunnelReadyTimeout)
+	for {
+		connected, err := deps.netbird.Status()
+		if err != nil {
+			return breverrors.WrapAndTrace(err)
 		}
+		if connected {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("the Brev tunnel did not connect within %s", tunnelReadyTimeout)
+		}
+		time.Sleep(tunnelReadyInterval)
 	}
 }
 

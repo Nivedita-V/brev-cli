@@ -8,6 +8,7 @@ import (
 
 	breverrors "github.com/brevdev/brev-cli/pkg/errors"
 	"github.com/brevdev/brev-cli/pkg/externalnode"
+	"github.com/brevdev/brev-cli/pkg/store"
 )
 
 // bearerTokenTransport injects a Bearer token into every request.
@@ -26,6 +27,9 @@ func (t *bearerTokenTransport) RoundTrip(req *http.Request) (*http.Response, err
 	}
 	req = req.Clone(req.Context())
 	req.Header.Set("Authorization", "Bearer "+token)
+	// Match the REST client: tag dev-plane requests with the CLI build so the
+	// backend can attribute traffic the same way.
+	store.AddCLIAttributionParams(req)
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, breverrors.WrapAndTrace(err)

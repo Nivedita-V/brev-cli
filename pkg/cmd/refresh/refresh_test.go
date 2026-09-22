@@ -4,11 +4,84 @@ import (
 	"testing"
 
 	nodev1 "buf.build/gen/go/brevdev/devplane/protocolbuffers/go/devplaneapi/v1"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/brevdev/brev-cli/pkg/cmd/util"
+	"github.com/brevdev/brev-cli/pkg/entity"
 )
 
 func strPtr(s string) *string { return &s }
+
+// identityCountingStore counts identity lookups. Unimplemented RefreshStore
+// methods are inherited from the embedded nil interface and would panic if a
+// test path reached them, which keeps these tests honest about what they touch.
+type identityCountingStore struct {
+	RefreshStore
+	org         *entity.Organization
+	user        *entity.User
+	activeOrgs  int
+	currentUser int
+	workspaces  []entity.Workspace
+}
+
+func (s *identityCountingStore) GetActiveOrganizationOrDefault() (*entity.Organization, error) {
+	s.activeOrgs++
+	return s.org, nil
+}
+
+func (s *identityCountingStore) GetCurrentUser() (*entity.User, error) {
+	s.currentUser++
+	return s.user, nil
+}
+
+func (s *identityCountingStore) GetContextWorkspaces() ([]entity.Workspace, error) {
+	return s.workspaces, nil
+}
+
+// A refresh touches the org and the user from several steps; each must be
+// resolved once for the whole run.
+func TestResolveRefreshIdentity_ResolvesOrgAndUserOnce(t *testing.T) {
+	s := &identityCountingStore{
+		org:  &entity.Organization{ID: "org_1"},
+		user: &entity.User{ID: "user_1"},
+	}
+
+	identity := resolveRefreshIdentity(s)
+
+	require.NotNil(t, identity.org)
+	require.NotNil(t, identity.user)
+	assert.Equal(t, "org_1", identity.org.ID)
+	assert.Equal(t, "user_1", identity.user.ID)
+	assert.Equal(t, 1, s.activeOrgs)
+	assert.Equal(t, 1, s.currentUser)
+}
+
+// The per-workspace SSH enrichment shares the refresh's user, so it must not
+// look it up again (that lookup was the third /api/me of a single refresh).
+func TestWorkspaceSSHStore_ReusesResolvedUser(t *testing.T) {
+	user := &entity.User{ID: "user_1"}
+	s := &identityCountingStore{
+		user:       user,
+		workspaces: []entity.Workspace{{ID: "ws_1", Status: entity.Stopped}},
+	}
+
+	got, err := workspaceSSHStore{RefreshStore: s, user: user}.GetContextWorkspaces()
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 0, s.currentUser, "the resolved user must be reused, not fetched again")
+}
+
+// Without a resolved identity there is nothing to match node SSH access
+// against, so node entries are skipped without any lookup.
+func TestGetExternalNodeSSHEntries_NoIdentitySkipsLookups(t *testing.T) {
+	s := &identityCountingStore{}
+
+	assert.Nil(t, getExternalNodeSSHEntries(s, refreshIdentity{}))
+	assert.Equal(t, 0, s.activeOrgs)
+	assert.Equal(t, 0, s.currentUser)
+}
 
 func TestResolveNodeSSHEntry_HappyPath(t *testing.T) {
 	node := &nodev1.ExternalNode{

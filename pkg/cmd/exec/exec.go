@@ -208,13 +208,9 @@ func runExecCommand(t *terminal.Terminal, sstore ExecStore, workspaceNameOrID st
 
 	if workspace.Status == "STOPPED" {
 		s := t.NewSpinner()
-		startErr := util.StartWorkspaceIfStopped(t, s, sstore, workspaceNameOrID, workspace, pollTimeout)
+		workspace, startErr := util.StartWorkspaceIfStopped(t, s, sstore, workspaceNameOrID, workspace, pollTimeout)
 		if startErr != nil {
 			return breverrors.WrapAndTrace(startErr)
-		}
-		err = util.PollUntil(s, workspace.ID, "RUNNING", sstore, " waiting for instance to be ready...", pollTimeout)
-		if err != nil {
-			return breverrors.WrapAndTrace(err)
 		}
 		// Refresh SSH config so the host entry is up to date
 		refreshRes := refresh.RunRefreshAsync(sstore)

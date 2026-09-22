@@ -35,6 +35,22 @@ func runSetupCommand(script string) error {
 	return nil
 }
 
+// netbirdStatusOutput runs "netbird status" and returns its output. The
+// unprivileged call works on most installs; useSudo covers daemons whose socket
+// is root-owned.
+func netbirdStatusOutput(useSudo bool) (string, error) {
+	name := "netbird"
+	args := []string{"status"}
+	if useSudo {
+		name, args = "sudo", []string{"netbird", "status"}
+	}
+	out, err := exec.Command(name, args...).Output() //nolint:gosec // fixed command
+	if err != nil {
+		return "", fmt.Errorf("read Brev tunnel status: %w", err)
+	}
+	return string(out), nil
+}
+
 // UninstallNetbird stops, uninstalls the service, and removes the NetBird
 // package or binary. It reads /etc/netbird/install.conf (written by the
 // install script) to determine the original installation method.

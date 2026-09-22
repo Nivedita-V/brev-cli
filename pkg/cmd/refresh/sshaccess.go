@@ -25,6 +25,9 @@ type environmentSSHClient interface {
 
 type workspaceSSHStore struct {
 	RefreshStore
+	// user is the refresh's already-resolved current user. When set, the
+	// per-workspace enrichment does not fetch it again.
+	user *entity.User
 }
 
 func (s workspaceSSHStore) GetContextWorkspaces() ([]entity.Workspace, error) {
@@ -33,10 +36,14 @@ func (s workspaceSSHStore) GetContextWorkspaces() ([]entity.Workspace, error) {
 		return nil, breverrors.WrapAndTrace(err)
 	}
 
-	user, err := s.GetCurrentUser()
-	if err != nil {
-		log.Printf("workspace SSH access: using legacy configuration (current user lookup failed): %v", err)
-		return workspaces, nil
+	user := s.user
+	if user == nil {
+		var err error
+		user, err = s.GetCurrentUser()
+		if err != nil {
+			log.Printf("workspace SSH access: using legacy configuration (current user lookup failed): %v", err)
+			return workspaces, nil
+		}
 	}
 
 	client := register.NewEnvironmentServiceClient(s, config.GlobalConfig.GetBrevPublicAPIURL())
