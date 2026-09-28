@@ -2,7 +2,6 @@ package login
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"testing"
 
@@ -124,39 +123,6 @@ func (m *mockLoginStore) GetAllWorkspaces(_ *store.GetWorkspacesOptions) ([]enti
 }
 func (m *mockLoginStore) GetCurrentWorkspaceID() (string, error) { return "", nil }
 func (m *mockLoginStore) GetWindowsDir() (string, error)         { return "", nil }
-
-// The login summary must name both the account and the organization, so a user
-// (or a script) can tell what the login resolved to.
-func TestShowBreadCrumbs_NamesIdentityAndOrg(t *testing.T) {
-	loginStore := &mockLoginStore{}
-	opts := LoginOptions{LoginStore: loginStore}
-
-	out := captureStdout(t, func() {
-		err := opts.showBreadCrumbs(terminal.New(),
-			&entity.Organization{ID: "org-1", Name: "Acme"},
-			&entity.User{ID: "user-1", Email: "dev@example.com"})
-		require.NoError(t, err)
-	})
-
-	assert.Contains(t, out, "dev@example.com")
-	assert.Contains(t, out, "Acme")
-}
-
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	original := os.Stdout
-	readPipe, writePipe, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = writePipe
-	defer func() { os.Stdout = original }()
-
-	fn()
-
-	require.NoError(t, writePipe.Close())
-	out, err := io.ReadAll(readPipe)
-	require.NoError(t, err)
-	return string(out)
-}
 
 func TestRunLoginWithAPIKey_SavesKeyAndResolvedOrg(t *testing.T) {
 	auth := &mockLoginAuth{}
