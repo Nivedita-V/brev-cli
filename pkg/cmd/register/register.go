@@ -11,6 +11,7 @@ import (
 
 	nodev1 "buf.build/gen/go/brevdev/devplane/protocolbuffers/go/devplaneapi/v1"
 	"connectrpc.com/connect"
+	"github.com/cenkalti/backoff/v4"
 	"github.com/google/uuid"
 
 	"github.com/brevdev/brev-cli/pkg/auth"
@@ -44,9 +45,9 @@ type NetBirdManager interface {
 	// connected, starting or reconnecting it if needed. Returns nil when
 	// the tunnel is healthy.
 	EnsureRunning() error
-	// Status reports whether the tunnel currently has an established
-	// connection to its management server.
-	Status() (bool, error)
+	// CheckReady returns nil when the tunnel is up and connected, and an
+	// error describing the current state otherwise.
+	CheckReady(ctx context.Context) error
 }
 
 // SetupRunner runs a setup script on the local machine.
@@ -375,7 +376,7 @@ func runRegisterSteps(ctx context.Context, t *terminal.Terminal, s RegisterStore
 
 	t.Vprint("")
 	t.Vprint(t.Yellow("[Step 5/5] Connecting device to Brev..."))
-	setupErr := runSetup(node, t, deps)
+	setupErr := runSetup(ctx, node, t, deps)
 
 	t.Vprintf("%s  Node registered.\n", t.Green("  ✓"))
 
@@ -500,9 +501,9 @@ func netbirdManagementConnected(statusOutput string) bool {
 }
 
 // runSetup connects the device to Brev and waits for the local tunnel to report
-// connected. It returns an error when the tunnel never comes up, so a
-// registration that did not finish cannot look successful.
-func runSetup(node *nodev1.ExternalNode, t *terminal.Terminal, deps registerDeps) error {
+// ready. It returns an error when the tunnel never comes up, so a registration
+// that did not finish cannot look successful.
+func runSetup(ctx context.Context, node *nodev1.ExternalNode, t *terminal.Terminal, deps registerDeps) error {
 	ci := node.GetConnectivityInfo()
 	if ci == nil || ci.GetRegistrationCommand() == "" {
 		return errors.New("Brev returned no tunnel setup command")
@@ -512,10 +513,10 @@ func runSetup(node *nodev1.ExternalNode, t *terminal.Terminal, deps registerDeps
 		return fmt.Errorf("tunnel setup command failed: %w", err)
 	}
 
-	// The setup command starts the tunnel; wait for the local agent to report
-	// connected rather than sleeping and hoping.
+	// The setup command starts the tunnel; wait for the agent to report ready
+	// rather than sleeping and hoping.
 	t.Vprint("  Waiting for the Brev tunnel to connect...")
-	if err := waitForTunnel(deps); err != nil {
+	if err := waitForTunnel(ctx, t, deps); err != nil {
 		return err
 	}
 	t.Vprintf("%s  Brev tunnel connected.\n", t.Green("  ✓"))
@@ -523,31 +524,38 @@ func runSetup(node *nodev1.ExternalNode, t *terminal.Terminal, deps registerDeps
 }
 
 var (
-	// tunnelReadyTimeout bounds how long register waits for the local tunnel to
-	// report a connected management session.
-	tunnelReadyTimeout = 15 * time.Second
-	// tunnelReadyInterval is the delay between tunnel status checks.
-	tunnelReadyInterval = time.Second
+	// Tunnel readiness retry budget. The initial and max intervals match the
+	// SSH grant backoff, and the total budget matches dev-plane's installer,
+	// which waits about a minute for the client to connect.
+	tunnelReadyInitialInterval = backoffInitialInterval
+	tunnelReadyMaxInterval     = backoffMaxInterval
+	tunnelReadyMaxElapsedTime  = backoffMaxElapsedTime
 )
 
-// waitForTunnel polls the local netbird agent until it reports a connected
-// management session, which is the same signal dev-plane uses to consider a
-// node connected.
-func waitForTunnel(deps registerDeps) error {
-	deadline := time.Now().Add(tunnelReadyTimeout)
-	for {
-		connected, err := deps.netbird.Status()
-		if err != nil {
-			return breverrors.WrapAndTrace(err)
-		}
-		if connected {
-			return nil
-		}
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf("the Brev tunnel did not connect within %s", tunnelReadyTimeout)
-		}
-		time.Sleep(tunnelReadyInterval)
+// waitForTunnel polls the local agent until it reports ready, retrying both the
+// not-yet-connected state and transient probe failures. It uses the same
+// context-aware exponential backoff as the SSH grant path, which matches
+// dev-plane's installer budget of roughly a minute.
+func waitForTunnel(ctx context.Context, t *terminal.Terminal, deps registerDeps) error {
+	backoffCtx := backoff.WithContext(backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(tunnelReadyInitialInterval),
+		backoff.WithMaxInterval(tunnelReadyMaxInterval),
+		backoff.WithMaxElapsedTime(tunnelReadyMaxElapsedTime),
+	), ctx)
+
+	checkReady := func() error {
+		// A not-ready tunnel and a transient probe error are both retried: the
+		// agent reports "not connected" throughout startup.
+		return deps.netbird.CheckReady(ctx)
 	}
+	onRetry := func(err error, d time.Duration) {
+		t.Vprintf("  Tunnel not ready yet (%v); retrying in %s...\n", err, d.Round(backoffPrintRound))
+	}
+
+	if err := backoff.RetryNotify(checkReady, backoffCtx, onRetry); err != nil {
+		return fmt.Errorf("the Brev tunnel did not become ready within %s: %w", tunnelReadyMaxElapsedTime, err)
+	}
+	return nil
 }
 
 // resumeRegistration reuses the pending record's device ID. AddNode is

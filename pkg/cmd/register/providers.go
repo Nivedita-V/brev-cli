@@ -2,6 +2,7 @@ package register
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -68,7 +69,7 @@ func (Netbird) EnsureRunning() error {
 		}
 	}
 
-	statusOut, err := netbirdStatusOutput(false)
+	statusOut, err := netbirdStatusOutput()
 	if err != nil {
 		// Service is running, just can't confirm peer status.
 		return nil
@@ -84,20 +85,21 @@ func (Netbird) EnsureRunning() error {
 	return nil
 }
 
-// Status reports whether the local Brev tunnel has an established connection to
-// its management server. This is the same signal dev-plane uses to consider a
-// node connected, read locally so readiness does not depend on a network round
-// trip.
-func (Netbird) Status() (bool, error) {
-	statusOut, err := netbirdStatusOutput(false)
-	if err != nil {
-		// The daemon socket is root-owned on some installs.
-		if sudoOut, sudoErr := netbirdStatusOutput(true); sudoErr == nil {
-			return netbirdManagementConnected(sudoOut), nil
-		}
-		return false, err
+// CheckReady reports whether the local Brev tunnel is ready to carry traffic,
+// using the same probe dev-plane's installer uses: `netbird status --check
+// startup` exits non-zero until the client is up and connected to its
+// management server. Run with sudo because the daemon socket may be root-owned
+// (the register flow already holds sudo).
+func (Netbird) CheckReady(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "sudo", "netbird", "status", "--check", "startup").CombinedOutput() //nolint:gosec // fixed command
+	if err == nil {
+		return nil
 	}
-	return netbirdManagementConnected(statusOut), nil
+	detail := strings.TrimSpace(string(out))
+	if detail == "" {
+		detail = err.Error()
+	}
+	return fmt.Errorf("Brev tunnel is not ready: %s", detail)
 }
 
 // ShellSetupRunner runs setup scripts via shell.
