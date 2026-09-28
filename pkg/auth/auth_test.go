@@ -5,11 +5,9 @@ import (
 	"io"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/brevdev/brev-cli/pkg/entity"
 	breverrors "github.com/brevdev/brev-cli/pkg/errors"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -273,13 +271,12 @@ func TestGetFreshAccessTokenOrNil_APIKeySkipsJWTValidationAndRefresh(t *testing.
 		RefreshToken: "should-not-refresh",
 	}}
 	a := Auth{
-		authStore: &s,
-		oauth:     &MockOauth{},
-		accessTokenValidator: func(_ string) (bool, error) {
+		&s,
+		&MockOauth{}, func(_ string) (bool, error) {
 			t.Fatal("api keys must not be parsed as JWTs")
 			return false, nil
 		},
-		shouldLogin: func() (bool, error) {
+		func() (bool, error) {
 			t.Fatal("api keys must not trigger login")
 			return false, nil
 		},
@@ -296,13 +293,12 @@ func TestGetFreshAccessTokenOrNil_APIKeyOnlyCredentialReturnsAPIKey(t *testing.T
 		APIKey: testAPIKey,
 	}}
 	a := Auth{
-		authStore: &s,
-		oauth:     &MockOauth{},
-		accessTokenValidator: func(_ string) (bool, error) {
+		&s,
+		&MockOauth{}, func(_ string) (bool, error) {
 			t.Fatal("api keys must not be parsed as JWTs")
 			return false, nil
 		},
-		shouldLogin: func() (bool, error) {
+		func() (bool, error) {
 			t.Fatal("api keys must not trigger login")
 			return false, nil
 		},
@@ -423,12 +419,11 @@ func TestSuccessNoRefreshGetFreshAccessTokenOrLogin(t *testing.T) {
 		RefreshToken: "rt",
 	}}
 	a := Auth{
-		authStore: &s,
-		oauth:     &MockOauth{},
-		accessTokenValidator: func(s string) (bool, error) {
+		&s,
+		&MockOauth{}, func(s string) (bool, error) {
 			return true, nil
 		},
-		shouldLogin: func() (bool, error) {
+		func() (bool, error) {
 			return true, nil
 		},
 	}
@@ -450,18 +445,15 @@ func TestSuccessRefreshGetFreshAccessTokenOrLogin(t *testing.T) {
 		RefreshToken: "ref",
 	}}
 	a := Auth{
-		authStore: &s,
-		oauth: &MockOauth{
+		&s, &MockOauth{
 			authTokens: &entity.AuthTokens{
 				AccessToken:  validToken,
 				RefreshToken: "",
 			},
 			loginTokens: &LoginTokens{},
-		},
-		accessTokenValidator: func(s string) (bool, error) {
+		}, func(s string) (bool, error) {
 			return false, nil
-		},
-		shouldLogin: func() (bool, error) {
+		}, func() (bool, error) {
 			return true, nil
 		},
 	}
@@ -492,12 +484,9 @@ func TestTokenDoesNotExistGetFreshAccessTokenOrLogin(t *testing.T) {
 		authTokens: nil,
 	}
 	a := Auth{
-		authStore: &s,
-		oauth:     &o,
-		accessTokenValidator: func(s string) (bool, error) {
+		&s, &o, func(s string) (bool, error) {
 			return false, nil
-		},
-		shouldLogin: func() (bool, error) {
+		}, func() (bool, error) {
 			return true, nil
 		},
 	}
@@ -531,12 +520,9 @@ func TestDenyLoginGetFreshAccessTokenOrLogin(t *testing.T) {
 		},
 	}
 	a := Auth{
-		authStore: &s,
-		oauth:     &o,
-		accessTokenValidator: func(s string) (bool, error) {
+		&s, &o, func(s string) (bool, error) {
 			return false, nil
-		},
-		shouldLogin: func() (bool, error) {
+		}, func() (bool, error) {
 			return false, nil
 		},
 	}
@@ -563,13 +549,12 @@ func TestDenyLoginGetFreshAccessTokenOrLogin(t *testing.T) {
 
 func TestFailedRefreshGetFreshAccessTokenOrLogin(t *testing.T) {
 	a := Auth{
-		authStore: &MockAuthStore{
+		&MockAuthStore{
 			authTokens: &entity.AuthTokens{
 				AccessToken:  "invalid",
 				RefreshToken: "invalid",
 			},
-		},
-		oauth: &MockOauth{
+		}, &MockOauth{
 			authTokens: nil,
 			loginTokens: &LoginTokens{
 				AuthTokens: entity.AuthTokens{
@@ -578,11 +563,9 @@ func TestFailedRefreshGetFreshAccessTokenOrLogin(t *testing.T) {
 				},
 				IDToken: "",
 			},
-		},
-		accessTokenValidator: func(s string) (bool, error) {
+		}, func(s string) (bool, error) {
 			return false, nil
-		},
-		shouldLogin: func() (bool, error) {
+		}, func() (bool, error) {
 			return true, nil
 		},
 	}
@@ -597,144 +580,4 @@ func TestFailedRefreshGetFreshAccessTokenOrLogin(t *testing.T) {
 
 func TestSSH(t *testing.T) {
 	suite.Run(t, new(BrevAPIAuthTestSuite))
-}
-
-// countingTokenStore records how often the credential file is read.
-type countingTokenStore struct {
-	tokens *entity.AuthTokens
-	reads  int
-}
-
-func (c *countingTokenStore) SaveAuthTokens(tokens entity.AuthTokens) error {
-	c.tokens = &tokens
-	return nil
-}
-
-func (c *countingTokenStore) GetAuthTokens() (*entity.AuthTokens, error) {
-	c.reads++
-	return c.tokens, nil
-}
-
-func (c *countingTokenStore) DeleteAuthTokens() error {
-	c.tokens = nil
-	return nil
-}
-
-func signedTokenExpiringAt(t *testing.T, exp time.Time) string {
-	t.Helper()
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"exp":   exp.Unix(),
-		"email": "test@example.com",
-	}).SignedString([]byte("test-secret"))
-	require.NoError(t, err)
-	return token
-}
-
-// A command issues many requests; the credential must resolve once per process.
-func TestGetFreshAccessTokenOrNil_ReadsSavedCredentialOncePerProcess(t *testing.T) {
-	t.Setenv(APIKeyEnvVar, "")
-	token := signedTokenExpiringAt(t, time.Now().Add(time.Hour))
-	s := &countingTokenStore{tokens: &entity.AuthTokens{AccessToken: token, RefreshToken: "rt"}}
-	a := NewAuth(s, &MockOauth{})
-
-	for range 3 {
-		got, err := a.GetFreshAccessTokenOrNil()
-		require.NoError(t, err)
-		assert.Equal(t, token, got)
-	}
-
-	assert.Equal(t, 1, s.reads)
-}
-
-// LoginAuth embeds Auth by value, so the memo must survive a value-receiver call
-// through the wrapper — otherwise every request would re-read the file again.
-func TestLoginAuth_SharesMemoAcrossCalls(t *testing.T) {
-	t.Setenv(APIKeyEnvVar, "")
-	token := signedTokenExpiringAt(t, time.Now().Add(time.Hour))
-	s := &countingTokenStore{tokens: &entity.AuthTokens{AccessToken: token, RefreshToken: "rt"}}
-	auth := NewLoginAuth(s, &MockOauth{})
-
-	for range 3 {
-		got, err := auth.GetAccessToken()
-		require.NoError(t, err)
-		assert.Equal(t, token, got)
-	}
-
-	assert.Equal(t, 1, s.reads)
-}
-
-// A token that expires within the skew window is never served from the memo, so
-// a long-running process still refreshes instead of using a dead token.
-func TestGetFreshAccessTokenOrNil_DoesNotServeTokenPastExpiry(t *testing.T) {
-	t.Setenv(APIKeyEnvVar, "")
-	s := &countingTokenStore{}
-	a := NewAuth(s, &MockOauth{})
-	a.accessTokenValidator = func(string) (bool, error) { return true, nil }
-
-	s.tokens = &entity.AuthTokens{AccessToken: signedTokenExpiringAt(t, time.Now().Add(5*time.Second))}
-	first, err := a.GetFreshAccessTokenOrNil()
-	require.NoError(t, err)
-
-	s.tokens = &entity.AuthTokens{AccessToken: signedTokenExpiringAt(t, time.Now().Add(time.Hour))}
-	second, err := a.GetFreshAccessTokenOrNil()
-	require.NoError(t, err)
-
-	assert.NotEqual(t, first, second, "an expiring token must not be reused from the memo")
-	assert.Equal(t, 2, s.reads)
-}
-
-// The memo survives until something invalidates it (login, logout, or an
-// explicit invalidate after a request failed for auth reasons).
-func TestInvalidateAccessTokenCache_ReResolvesCredential(t *testing.T) {
-	t.Setenv(APIKeyEnvVar, "")
-	s := &countingTokenStore{tokens: &entity.AuthTokens{APIKey: testAPIKey}}
-	a := NewAuth(s, &MockOauth{})
-
-	token, err := a.GetFreshAccessTokenOrNil()
-	require.NoError(t, err)
-	assert.Equal(t, testAPIKey, token)
-
-	s.tokens = &entity.AuthTokens{APIKey: BrevAPIKeyPrefix + "rotated-key"}
-	a.InvalidateAccessTokenCache()
-
-	token, err = a.GetFreshAccessTokenOrNil()
-	require.NoError(t, err)
-	assert.Equal(t, BrevAPIKeyPrefix+"rotated-key", token)
-}
-
-// Stores share one credentials file (loginCmdStore / noLoginCmdStore). A
-// "logged out" result must not be memoized: a login performed later in the same
-// process has to be visible to credentials resolved after it.
-func TestGetFreshAccessTokenOrNil_DoesNotMemoizeMissingCredential(t *testing.T) {
-	t.Setenv(APIKeyEnvVar, "")
-	store := &countingTokenStore{}
-	a := NewAuth(store, &MockOauth{})
-
-	token, err := a.GetFreshAccessTokenOrNil()
-	require.NoError(t, err)
-	assert.Empty(t, token)
-
-	// The login flow writes credentials to the same store.
-	require.NoError(t, store.SaveAuthTokens(entity.AuthTokens{
-		AccessToken: signedTokenExpiringAt(t, time.Now().Add(time.Hour)),
-	}))
-
-	token, err = a.GetFreshAccessTokenOrNil()
-	require.NoError(t, err)
-	assert.NotEmpty(t, token, "credentials written after a logged-out resolution must be picked up")
-}
-
-// Logging out must not leave a usable credential behind in the memo.
-func TestLogout_ClearsMemoizedCredential(t *testing.T) {
-	t.Setenv(APIKeyEnvVar, "")
-	s := &countingTokenStore{tokens: &entity.AuthTokens{APIKey: testAPIKey}}
-	a := NewAuth(s, &MockOauth{})
-
-	_, err := a.GetFreshAccessTokenOrNil()
-	require.NoError(t, err)
-	require.NoError(t, a.Logout())
-
-	token, err := a.GetFreshAccessTokenOrNil()
-	require.NoError(t, err)
-	assert.Empty(t, token)
 }
