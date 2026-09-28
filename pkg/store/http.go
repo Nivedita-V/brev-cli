@@ -97,15 +97,6 @@ func (t attributionTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return resp, nil
 }
 
-// NewAttributionHTTPClient returns a client that tags requests with the CLI
-// attribution params.
-func NewAttributionHTTPClient(base http.RoundTripper) *http.Client {
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	return &http.Client{Transport: attributionTransport{base: base}}
-}
-
 type AuthHTTPStore struct {
 	NoAuthHTTPStore
 	authHTTPClient           *AuthHTTPClient
