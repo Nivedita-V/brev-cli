@@ -35,15 +35,6 @@ func runSetupCommand(script string) error {
 	return nil
 }
 
-// netbirdStatusOutput runs "netbird status" and returns its output.
-func netbirdStatusOutput() (string, error) {
-	out, err := exec.Command("netbird", "status").Output() //nolint:gosec // fixed command
-	if err != nil {
-		return "", fmt.Errorf("read Brev tunnel status: %w", err)
-	}
-	return string(out), nil
-}
-
 // UninstallNetbird stops, uninstalls the service, and removes the NetBird
 // package or binary. It reads /etc/netbird/install.conf (written by the
 // install script) to determine the original installation method.

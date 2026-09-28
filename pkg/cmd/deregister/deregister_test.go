@@ -132,10 +132,9 @@ type mockNetBirdManager struct {
 	err    error
 }
 
-func (m *mockNetBirdManager) Install() error                   { return m.err }
-func (m *mockNetBirdManager) Uninstall() error                 { m.called = true; return m.err }
-func (m *mockNetBirdManager) EnsureRunning() error             { return m.err }
-func (m *mockNetBirdManager) CheckReady(context.Context) error { return nil }
+func (m *mockNetBirdManager) Install() error       { return m.err }
+func (m *mockNetBirdManager) Uninstall() error     { m.called = true; return m.err }
+func (m *mockNetBirdManager) EnsureRunning() error { return m.err }
 
 type mockNodeClientFactory struct {
 	serverURL string

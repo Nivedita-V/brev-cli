@@ -5,17 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	nodev1connect "buf.build/gen/go/brevdev/devplane/connectrpc/go/devplaneapi/v1/devplaneapiv1connect"
 	nodev1 "buf.build/gen/go/brevdev/devplane/protocolbuffers/go/devplaneapi/v1"
 	"connectrpc.com/connect"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/brevdev/brev-cli/pkg/auth"
 	"github.com/brevdev/brev-cli/pkg/entity"
@@ -136,26 +131,11 @@ func (m mockSelector) Select(_ string, items []string) string {
 	return ""
 }
 
-type mockNetBirdManager struct {
-	err error
-	// notReady makes CheckReady report a tunnel that never comes up. The zero
-	// value reports a ready tunnel so the happy path needs no setup.
-	notReady bool
-}
+type mockNetBirdManager struct{ err error }
 
 func (m mockNetBirdManager) Install() error       { return m.err }
 func (m mockNetBirdManager) Uninstall() error     { return m.err }
 func (m mockNetBirdManager) EnsureRunning() error { return m.err }
-
-func (m mockNetBirdManager) CheckReady(context.Context) error {
-	if m.err != nil {
-		return m.err
-	}
-	if m.notReady {
-		return errors.New("Brev tunnel is not ready: management: Disconnected")
-	}
-	return nil
-}
 
 type mockSetupRunner struct {
 	called bool
@@ -266,72 +246,6 @@ func okAddNodeFn(captured *[]string) func(*nodev1.AddNodeRequest) (*nodev1.AddNo
 			},
 		}, nil
 	}
-}
-
-// flakyTunnel reports failure for its first `failures` probes, then ready.
-type flakyTunnel struct {
-	mockNetBirdManager
-	failures int
-	calls    int
-}
-
-func (f *flakyTunnel) CheckReady(context.Context) error {
-	f.calls++
-	if f.calls <= f.failures {
-		return errors.New("Brev tunnel is not ready: management: Disconnected")
-	}
-	return nil
-}
-
-// shrinkTunnelBudget makes the readiness wait finish fast in tests. The
-// production budget matches dev-plane's installer (about a minute).
-func shrinkTunnelBudget(t *testing.T) {
-	t.Helper()
-	initial, max, elapsed := tunnelReadyInitialInterval, tunnelReadyMaxInterval, tunnelReadyMaxElapsedTime
-	tunnelReadyInitialInterval, tunnelReadyMaxInterval, tunnelReadyMaxElapsedTime = 5*time.Millisecond, 10*time.Millisecond, 150*time.Millisecond
-	t.Cleanup(func() {
-		tunnelReadyInitialInterval, tunnelReadyMaxInterval, tunnelReadyMaxElapsedTime = initial, max, elapsed
-	})
-}
-
-// A tunnel that is not ready yet (the normal state right after `netbird up`) is
-// polled, not treated as a failure.
-func Test_runRegister_RetriesUntilTunnelReady(t *testing.T) {
-	shrinkTunnelBudget(t)
-
-	deps, server := testRegisterDeps(t, &fakeNodeService{addNodeFn: okAddNodeFn(nil)}, &mockRegistrationStore{})
-	defer server.Close()
-	tunnel := &flakyTunnel{failures: 2}
-	deps.netbird = tunnel
-
-	err := runRegister(context.Background(), terminal.New(), testRegisterStore(),
-		registerOpts{interactive: false, name: "my-spark", orgName: "TestOrg"}, deps)
-
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, tunnel.calls, 3, "not-ready and erroring probes must be retried")
-}
-
-// A registration whose tunnel never becomes ready must not report success: the
-// node is registered but the command exits non-zero.
-func Test_runRegister_TunnelNeverReadyFails(t *testing.T) {
-	shrinkTunnelBudget(t)
-
-	regStore := &mockRegistrationStore{}
-	deps, server := testRegisterDeps(t, &fakeNodeService{addNodeFn: okAddNodeFn(nil)}, regStore)
-	defer server.Close()
-	tunnel := &flakyTunnel{failures: 1 << 20}
-	deps.netbird = tunnel
-
-	err := runRegister(context.Background(), terminal.New(), testRegisterStore(),
-		registerOpts{interactive: false, name: "my-spark", orgName: "TestOrg"}, deps)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "did not become ready")
-	assert.Greater(t, tunnel.calls, 1, "a not-ready tunnel must be polled until the budget is spent")
-	// The node itself was registered and stored locally, so a re-run can resume.
-	reg, loadErr := regStore.LoadAll()
-	require.NoError(t, loadErr)
-	assert.Equal(t, RegistrationStatusRegistered, reg.Status)
 }
 
 // runRegisterCase absorbs scaffolding tests repeat: deps, server
@@ -637,13 +551,8 @@ func Test_runRegister_NoSetupCommand(t *testing.T) {
 	term := terminal.New()
 	opts := registerOpts{interactive: false, name: "my-spark", orgName: "TestOrg"}
 	err := runRegister(context.Background(), term, store, opts, deps)
-	// Without a setup command the tunnel can never connect, so registration is
-	// incomplete and the command must fail rather than report success.
-	if err == nil {
-		t.Fatal("expected an error when no setup command is returned")
-	}
-	if !strings.Contains(err.Error(), "tunnel") {
-		t.Errorf("expected tunnel-related error, got: %v", err)
+	if err != nil {
+		t.Fatalf("runRegister failed: %v", err)
 	}
 
 	if setupRunner.called {
@@ -671,58 +580,6 @@ func Test_runSetupCommand_Validation(t *testing.T) {
 			}
 			if !tt.expectReject && rejected {
 				t.Errorf("expected command to be accepted, but got: %v", err)
-			}
-		})
-	}
-}
-
-// The readiness probe must be the one dev-plane's installer relies on:
-// `netbird status --check startup` (exit 0 == ready), run with sudo because the
-// daemon socket may be root-owned.
-func TestNetbird_CheckReady_UsesDevplaneStartupCheck(t *testing.T) {
-	dir := t.TempDir()
-	argsFile := filepath.Join(dir, "args")
-	writeFakeCmd := func(name, script string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
-			t.Fatalf("write fake %s: %v", name, err)
-		}
-	}
-
-	tests := []struct {
-		name       string
-		exitCode   string
-		wantErr    bool
-		outputText string
-	}{
-		{name: "ready", exitCode: "0"},
-		{name: "not ready", exitCode: "1", wantErr: true, outputText: "management: Disconnected"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			writeFakeCmd("sudo", "#!/bin/sh\necho \"$@\" > "+argsFile+"\necho \""+tt.outputText+"\"\nexit "+tt.exitCode+"\n")
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-			err := Netbird{}.CheckReady(context.Background())
-
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected an error while the tunnel is not ready")
-				}
-				if !strings.Contains(err.Error(), tt.outputText) {
-					t.Errorf("expected the probe output in the error, got: %v", err)
-				}
-			} else if err != nil {
-				t.Fatalf("expected ready tunnel, got: %v", err)
-			}
-
-			args, readErr := os.ReadFile(argsFile)
-			if readErr != nil {
-				t.Fatalf("read recorded args: %v", readErr)
-			}
-			if got := strings.TrimSpace(string(args)); got != "netbird status --check startup" {
-				t.Errorf("expected `netbird status --check startup`, got: %q", got)
 			}
 		})
 	}
