@@ -11,102 +11,99 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/brevdev/brev-cli/pkg/auth"
 	"github.com/brevdev/brev-cli/pkg/entity"
-	"github.com/brevdev/brev-cli/pkg/terminal"
 )
 
-// pollCountingStore serves workspace status without any network access.
-type pollCountingStore struct {
-	status string
-	calls  int
+func TestRequireRunning(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     string
+		wantErr    bool
+		wantSubstr []string
+	}{
+		{
+			name:   "running is ready",
+			status: entity.Running,
+		},
+		{
+			name:       "stopped tells the user how to start it",
+			status:     entity.Stopped,
+			wantErr:    true,
+			wantSubstr: []string{"is not running", "please start it with: brev start my-box"},
+		},
+		{
+			name:       "mid-boot names the status instead of suggesting start",
+			status:     entity.Starting,
+			wantErr:    true,
+			wantSubstr: []string{"is not running (status: STARTING)", "brev ls"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := RequireRunning(&entity.Workspace{Name: "my-box", Status: tt.status})
+
+			if !tt.wantErr {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			for _, substr := range tt.wantSubstr {
+				assert.Contains(t, err.Error(), substr)
+			}
+		})
+	}
 }
 
-func (p *pollCountingStore) GetWorkspace(_ string) (*entity.Workspace, error) {
-	p.calls++
-	return &entity.Workspace{ID: "ws_1", Status: p.status}, nil
-}
+// Retryable failures are attempted exactly sshAvailabilityMaxAttempts times, then
+// reported: callers must not wait longer than that.
+func TestWaitForSSHToBeAvailable_StopsAfterMaxAttempts(t *testing.T) {
+	dir := t.TempDir()
+	attemptsFile := filepath.Join(dir, "attempts")
+	fakeSSH := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\n" +
+		"n=$(cat " + attemptsFile + " 2>/dev/null || echo 0)\n" +
+		"echo $((n+1)) > " + attemptsFile + "\n" +
+		"echo 'ssh: connect to host my-box port 22: Connection refused' >&2\n" +
+		"exit 255\n"
+	require.NoError(t, os.WriteFile(fakeSSH, []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-// startCountingStore advances a workspace from STOPPED to RUNNING on start.
-type startCountingStore struct {
-	workspace *entity.Workspace
-	started   bool
-	starts    int
-}
+	originalSleep := sshAvailabilityRetrySleep
+	sshAvailabilityRetrySleep = 0
+	t.Cleanup(func() { sshAvailabilityRetrySleep = originalSleep })
 
-func (s *startCountingStore) GetAuthTokens() (*entity.AuthTokens, error) { return nil, nil }
-
-func (s *startCountingStore) GetCurrentUser() (*entity.User, error) {
-	return &entity.User{ID: "user_1"}, nil
-}
-
-func (s *startCountingStore) GetActiveOrganizationOrDefault() (*entity.Organization, error) {
-	return &entity.Organization{ID: "org_1"}, nil
-}
-
-func (s *startCountingStore) GetWorkspaceByNameOrID(_ string, _ string) ([]entity.Workspace, error) {
-	return []entity.Workspace{*s.workspace}, nil
-}
-
-func (s *startCountingStore) GetWorkspace(_ string) (*entity.Workspace, error) {
-	return s.workspace, nil
-}
-
-func (s *startCountingStore) StartWorkspace(_ string) (*entity.Workspace, error) {
-	s.starts++
-	s.started = true
-	s.workspace.Status = entity.Running
-	return s.workspace, nil
-}
-
-func testSpinner() *spinner.Spinner {
-	return spinner.New(spinner.CharSets[9], 100*time.Millisecond)
-}
-
-// An instance that is already in the target state must not wait out a poll
-// interval before the first status check.
-func TestPollUntil_AlreadyInStateReturnsImmediately(t *testing.T) {
-	store := &pollCountingStore{status: entity.Running}
-
-	start := time.Now()
-	err := PollUntil(testSpinner(), "ws_1", entity.Running, store, " waiting", time.Minute)
-	elapsed := time.Since(start)
-
-	require.NoError(t, err)
-	assert.Equal(t, 1, store.calls)
-	assert.Less(t, elapsed, time.Second, "already-running instance waited for the poll interval")
-}
-
-// A timeout is reported without sleeping past the deadline.
-func TestPollUntil_TimesOutOnTime(t *testing.T) {
-	store := &pollCountingStore{status: "CREATING"}
-
-	start := time.Now()
-	err := PollUntil(testSpinner(), "ws_1", entity.Running, store, " waiting", 100*time.Millisecond)
-	elapsed := time.Since(start)
+	err := WaitForSSHToBeAvailable("my-box", spinner.New(spinner.CharSets[9], 100*time.Millisecond))
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "timed out waiting for instance to reach RUNNING")
-	assert.Less(t, elapsed, 2*time.Second, "timeout overshot its deadline")
+	assert.Contains(t, err.Error(), "was not available after 3 attempts")
+
+	raw, readErr := os.ReadFile(attemptsFile)
+	require.NoError(t, readErr)
+	assert.Equal(t, "3", strings.TrimSpace(string(raw)), "transient failures must stop after the attempt budget")
 }
 
-// Starting a stopped instance returns the refreshed workspace, so the caller
-// neither re-fetches nor polls it a second time.
-func TestStartWorkspaceIfStopped_ReturnsRefreshedWorkspace(t *testing.T) {
-	t.Setenv(auth.APIKeyEnvVar, "")
-	store := &startCountingStore{workspace: &entity.Workspace{
-		ID:              "ws_1",
-		Name:            "box",
-		Status:          "STOPPED",
-		CreatedByUserID: "user_1",
-	}}
+// A failure that waiting cannot fix fails on the first attempt.
+func TestWaitForSSHToBeAvailable_FailsFastOnPermanentError(t *testing.T) {
+	dir := t.TempDir()
+	attemptsFile := filepath.Join(dir, "attempts")
+	fakeSSH := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\n" +
+		"n=$(cat " + attemptsFile + " 2>/dev/null || echo 0)\n" +
+		"echo $((n+1)) > " + attemptsFile + "\n" +
+		"echo 'Host key verification failed.' >&2\n" +
+		"exit 255\n"
+	require.NoError(t, os.WriteFile(fakeSSH, []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	got, err := StartWorkspaceIfStopped(terminal.New(), testSpinner(), store, "box", store.workspace, time.Minute)
+	err := WaitForSSHToBeAvailable("my-box", spinner.New(spinner.CharSets[9], 100*time.Millisecond))
 
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, entity.Running, got.Status)
-	assert.Equal(t, 1, store.starts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Host key verification failed")
+
+	raw, readErr := os.ReadFile(attemptsFile)
+	require.NoError(t, readErr)
+	assert.Equal(t, "1", strings.TrimSpace(string(raw)), "a permanent failure must not be retried")
 }
 
 func TestWaitForSSHToBeAvailableTimesOutStuckSSHAttempt(t *testing.T) {

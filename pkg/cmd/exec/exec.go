@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/brevdev/brev-cli/pkg/analytics"
 	"github.com/brevdev/brev-cli/pkg/cmd/completions"
@@ -51,7 +50,7 @@ var (
 )
 
 type ExecStore interface {
-	util.WorkspaceStartStore
+	util.GetWorkspaceByNameOrIDErrStore
 	refresh.RefreshStore
 	GetOrganizations(options *store.GetOrganizationsOptions) ([]entity.Organization, error)
 	GetWorkspaces(organizationID string, options *store.GetWorkspacesOptions) ([]entity.Workspace, error)
@@ -176,8 +175,6 @@ func parseCommand(command string) (string, error) {
 	return command, nil
 }
 
-const pollTimeout = 10 * time.Minute
-
 func runExecCommand(t *terminal.Terminal, sstore ExecStore, workspaceNameOrID string, host bool, command string) error {
 	// Determine SSH alias: use the workspace name directly (with -host suffix if needed)
 	sshName := workspaceNameOrID
@@ -206,43 +203,13 @@ func runExecCommand(t *terminal.Terminal, sstore ExecStore, workspaceNameOrID st
 			workspaceNameOrID, err))
 	}
 
-	if workspace.Status == "STOPPED" {
-		s := t.NewSpinner()
-		workspace, startErr := util.StartWorkspaceIfStopped(t, s, sstore, workspaceNameOrID, workspace, pollTimeout)
-		if startErr != nil {
-			return breverrors.WrapAndTrace(startErr)
-		}
-		// Refresh SSH config so the host entry is up to date
-		refreshRes := refresh.RunRefreshAsync(sstore)
-		if err = refreshRes.Await(); err != nil {
-			return breverrors.WrapAndTrace(err)
-		}
-
-		localIdentifier := workspace.GetLocalIdentifier()
-		if host {
-			localIdentifier = workspace.GetHostIdentifier()
-		}
-		sshName = string(localIdentifier)
-
-		err = util.WaitForSSHToBeAvailable(sshName, s)
-		if err != nil {
-			return breverrors.WrapAndTrace(err)
-		}
-		err = runSSH(sshName, command)
-		if err != nil {
-			return breverrors.WrapAndTrace(err)
-		}
-		go trackExecAnalytics(sstore, workspaceNameOrID)
-		return nil
+	// Not running: no waiting, no auto-start — tell the user what to run.
+	if err := util.RequireRunning(workspace); err != nil {
+		return err //nolint:wrapcheck // do not present stack trace for this error
 	}
 
-	if workspace.Status != "RUNNING" {
-		return breverrors.WrapAndTrace(fmt.Errorf(
-			"instance %q is in state %q — please check with: brev ls",
-			workspaceNameOrID, workspace.Status))
-	}
-
-	// Instance is RUNNING but SSH failed — maybe still booting, do the wait
+	// Instance is RUNNING but SSH failed — maybe still booting, refresh and retry
+	// a few times.
 	s := t.NewSpinner()
 	refreshRes := refresh.RunRefreshAsync(sstore)
 	if err = refreshRes.Await(); err != nil {

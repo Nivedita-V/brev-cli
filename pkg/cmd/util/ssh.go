@@ -11,7 +11,6 @@ import (
 	"github.com/brevdev/brev-cli/pkg/entity"
 	breverrors "github.com/brevdev/brev-cli/pkg/errors"
 	"github.com/brevdev/brev-cli/pkg/store"
-	"github.com/brevdev/brev-cli/pkg/terminal"
 	"github.com/briandowns/spinner"
 )
 
@@ -20,47 +19,26 @@ var (
 	sshAvailabilityAttemptTimeout        = 5 * time.Second
 	sshAvailabilityWaitDelay             = time.Second
 	sshAvailabilityRetrySleep            = time.Second
-	sshAvailabilityMaxAttempts           = 20
+	// Only transient "host is not accepting connections yet" failures are worth
+	// retrying, and only briefly: anything longer is the user's call, not ours.
+	sshAvailabilityMaxAttempts = 3
 )
 
-// WorkspacePollingStore is the minimal interface needed for polling workspace state
-type WorkspacePollingStore interface {
-	GetWorkspace(workspaceID string) (*entity.Workspace, error)
-}
-
-// WorkspaceStartStore is the interface needed for starting stopped workspaces
-type WorkspaceStartStore interface {
-	GetWorkspaceByNameOrIDErrStore
-	WorkspacePollingStore
-	StartWorkspace(workspaceID string) (*entity.Workspace, error)
-}
-
-// pollInterval is how long PollUntil waits between status checks.
-const pollInterval = 5 * time.Second
-
-// PollUntil polls the workspace status until it matches the desired state or times out
-func PollUntil(s *spinner.Spinner, wsid string, state string, pollingStore WorkspacePollingStore, waitMsg string, timeout time.Duration) error {
-	s.Suffix = waitMsg
-	s.Start()
-	defer s.Stop()
-	deadline := time.Now().Add(timeout)
-	for {
-		// Check before sleeping so an instance already in the target state
-		// returns immediately instead of waiting out one poll interval.
-		ws, err := pollingStore.GetWorkspace(wsid)
-		if err != nil {
-			return breverrors.WrapAndTrace(err)
-		}
-		if ws.Status == state {
-			return nil
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return breverrors.WrapAndTrace(fmt.Errorf("timed out waiting for instance to reach %s state after %v", state, timeout))
-		}
-		s.Suffix = waitMsg
-		// Never sleep past the deadline, so timeouts are reported on time.
-		time.Sleep(min(remaining, pollInterval))
+// RequireRunning returns an actionable error when the workspace cannot be
+// reached over SSH. Callers surface it instead of waiting for a starting
+// instance or starting a stopped one for the user.
+func RequireRunning(workspace *entity.Workspace) error {
+	switch workspace.Status {
+	case entity.Running:
+		return nil
+	case entity.Stopped:
+		return breverrors.NewValidationError(fmt.Sprintf(
+			"instance %s is not running, please start it with: brev start %s",
+			workspace.Name, workspace.Name))
+	default:
+		return breverrors.NewValidationError(fmt.Sprintf(
+			"instance %s is not running (status: %s); run 'brev ls' to check on it",
+			workspace.Name, workspace.Status))
 	}
 }
 
@@ -112,31 +90,4 @@ func WaitForSSHToBeAvailable(sshAlias string, s *spinner.Spinner) error {
 		time.Sleep(sshAvailabilityRetrySleep)
 		s.Start()
 	}
-}
-
-// StartWorkspaceIfStopped starts a workspace and waits for it to be running,
-// returning the refreshed workspace so callers neither re-fetch nor re-poll it.
-func StartWorkspaceIfStopped(t *terminal.Terminal, s *spinner.Spinner, tstore WorkspaceStartStore, wsIDOrName string, workspace *entity.Workspace, timeout time.Duration) (*entity.Workspace, error) {
-	activeOrg, err := tstore.GetActiveOrganizationOrDefault()
-	if err != nil {
-		return nil, breverrors.WrapAndTrace(err)
-	}
-	workspaces, err := tstore.GetWorkspaceByNameOrID(activeOrg.ID, wsIDOrName)
-	if err != nil {
-		return nil, breverrors.WrapAndTrace(err)
-	}
-	startedWorkspace, err := tstore.StartWorkspace(workspaces[0].ID)
-	if err != nil {
-		return nil, breverrors.WrapAndTrace(err)
-	}
-	t.Vprintf("%s", t.Yellow("Instance %s is starting. \n\n", startedWorkspace.Name))
-	err = PollUntil(s, workspace.ID, entity.Running, tstore, " hang tight 🤙", timeout)
-	if err != nil {
-		return nil, breverrors.WrapAndTrace(err)
-	}
-	refreshed, err := GetUserWorkspaceByNameOrIDErr(tstore, wsIDOrName)
-	if err != nil {
-		return nil, breverrors.WrapAndTrace(err)
-	}
-	return refreshed, nil
 }

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	nodev1 "buf.build/gen/go/brevdev/devplane/protocolbuffers/go/devplaneapi/v1"
 
@@ -44,7 +43,7 @@ var (
 )
 
 type ShellStore interface {
-	util.WorkspaceStartStore
+	util.GetWorkspaceByNameOrIDErrStore
 	refresh.RefreshStore
 	GetOrganizations(options *store.GetOrganizationsOptions) ([]entity.Organization, error)
 	GetWorkspaces(organizationID string, options *store.GetWorkspacesOptions) ([]entity.Workspace, error)
@@ -77,8 +76,6 @@ func NewCmdShell(t *terminal.Terminal, store ShellStore, noLoginStartStore Shell
 	return cmd
 }
 
-const pollTimeout = 10 * time.Minute
-
 func runShellCommand(t *terminal.Terminal, sstore ShellStore, workspaceNameOrID string, host bool) error {
 	if _, err := sstore.GetAccessToken(); err != nil {
 		return breverrors.WrapAndTrace(err)
@@ -93,18 +90,9 @@ func runShellCommand(t *terminal.Terminal, sstore ShellStore, workspaceNameOrID 
 	}
 	workspace := target.Workspace
 
-	if workspace.Status == "STOPPED" { // we start the env for the user
-		workspace, err = util.StartWorkspaceIfStopped(t, s, sstore, workspaceNameOrID, workspace, pollTimeout)
-		if err != nil {
-			return breverrors.WrapAndTrace(err)
-		}
-	} else if workspace.Status != "RUNNING" {
-		// Starting already waited for RUNNING and returned the refreshed
-		// instance, so this only runs for instances that were mid-boot.
-		err = util.PollUntil(s, workspace.ID, "RUNNING", sstore, " waiting for instance to be ready...", pollTimeout)
-		if err != nil {
-			return breverrors.WrapAndTrace(err)
-		}
+	// No waiting and no auto-start: if the instance is not up, say what to run.
+	if err := util.RequireRunning(workspace); err != nil {
+		return err //nolint:wrapcheck // do not present stack trace for this error
 	}
 
 	localIdentifier := workspace.GetLocalIdentifier()
@@ -127,8 +115,8 @@ func runShellCommand(t *terminal.Terminal, sstore ShellStore, workspaceNameOrID 
 	if err != nil {
 		return breverrors.WrapAndTrace(err)
 	}
-	if workspace.Status != "RUNNING" {
-		return breverrors.New("Instance is not running")
+	if err := util.RequireRunning(workspace); err != nil {
+		return err //nolint:wrapcheck // do not present stack trace for this error
 	}
 
 	err = refreshRes.Await()
