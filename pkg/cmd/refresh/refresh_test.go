@@ -23,6 +23,11 @@ type identityCountingStore struct {
 	activeOrgs  int
 	currentUser int
 	workspaces  []entity.Workspace
+
+	// listing counts the two ways a caller can list workspaces: with the
+	// caller's identity (no lookups) or by letting the store resolve it again.
+	forIdentity []string
+	resolving   int
 }
 
 func (s *identityCountingStore) GetActiveOrganizationOrDefault() (*entity.Organization, error) {
@@ -36,6 +41,12 @@ func (s *identityCountingStore) GetCurrentUser() (*entity.User, error) {
 }
 
 func (s *identityCountingStore) GetContextWorkspaces() ([]entity.Workspace, error) {
+	s.resolving++
+	return s.workspaces, nil
+}
+
+func (s *identityCountingStore) GetContextWorkspacesFor(orgID, userID string) ([]entity.Workspace, error) {
+	s.forIdentity = append(s.forIdentity, orgID+"/"+userID)
 	return s.workspaces, nil
 }
 
@@ -57,20 +68,42 @@ func TestResolveRefreshIdentity_ResolvesOrgAndUserOnce(t *testing.T) {
 	assert.Equal(t, 1, s.currentUser)
 }
 
-// The per-workspace SSH enrichment shares the refresh's user, so it must not
-// look it up again (that lookup was the third /api/me of a single refresh).
-func TestWorkspaceSSHStore_ReusesResolvedUser(t *testing.T) {
+// The per-workspace SSH enrichment shares the refresh's user, and the workspace
+// listing uses the refresh's org and user, so neither step looks either of them
+// up again (that was the second /api/me and org call of a single refresh).
+func TestWorkspaceSSHStore_ReusesResolvedIdentity(t *testing.T) {
 	user := &entity.User{ID: "user_1"}
+	org := &entity.Organization{ID: "org_1"}
 	s := &identityCountingStore{
+		org:        org,
 		user:       user,
 		workspaces: []entity.Workspace{{ID: "ws_1", Status: entity.Stopped}},
 	}
 
-	got, err := workspaceSSHStore{RefreshStore: s, user: user}.GetContextWorkspaces()
+	got, err := workspaceSSHStore{RefreshStore: s, org: org, user: user}.GetContextWorkspaces()
 
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, 0, s.currentUser, "the resolved user must be reused, not fetched again")
+	assert.Equal(t, 0, s.activeOrgs, "the resolved org must be reused, not fetched again")
+	assert.Equal(t, []string{"org_1/user_1"}, s.forIdentity, "listing must use the refresh identity")
+	assert.Equal(t, 0, s.resolving, "listing must not fall back to re-resolving org and user")
+}
+
+// Without a resolved identity the wrapper falls back to the store's own
+// resolution rather than failing.
+func TestWorkspaceSSHStore_FallsBackWhenIdentityMissing(t *testing.T) {
+	s := &identityCountingStore{
+		user:       &entity.User{ID: "user_1"},
+		workspaces: []entity.Workspace{{ID: "ws_1", Status: entity.Stopped}},
+	}
+
+	got, err := workspaceSSHStore{RefreshStore: s}.GetContextWorkspaces()
+
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 1, s.resolving, "expected the store's own resolution to be used")
+	assert.Equal(t, 1, s.currentUser, "the enrichment falls back to resolving the user")
 }
 
 // Without a resolved identity there is nothing to match node SSH access

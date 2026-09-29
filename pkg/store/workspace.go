@@ -441,15 +441,30 @@ func (s AuthHTTPStore) GetContextWorkspaces() ([]entity.Workspace, error) {
 	if err != nil {
 		return nil, breverrors.WrapAndTrace(err)
 	}
-	if auth.IsAPIKeyAuthStore(&s) {
-		return s.GetWorkspaces(org.ID, nil)
+
+	userID := ""
+	if !auth.IsAPIKeyAuthStore(&s) {
+		user, err := s.GetCurrentUser()
+		if err != nil {
+			return nil, breverrors.WrapAndTrace(err)
+		}
+		userID = user.ID
 	}
 
-	user, err := s.GetCurrentUser()
-	if err != nil {
-		return nil, breverrors.WrapAndTrace(err)
+	return s.GetContextWorkspacesFor(org.ID, userID)
+}
+
+// GetContextWorkspacesFor lists the workspaces the given user can see in the
+// given organization without resolving either again, so callers that already
+// know both (for example brev refresh) do not repeat the lookups. An empty
+// userID lists the whole org, which is what API-key auth does.
+func (s AuthHTTPStore) GetContextWorkspacesFor(orgID string, userID string) ([]entity.Workspace, error) {
+	var options *GetWorkspacesOptions
+	if userID != "" && !auth.IsAPIKeyAuthStore(&s) {
+		options = &GetWorkspacesOptions{UserID: userID}
 	}
-	workspaces, err := s.GetWorkspaces(org.ID, &GetWorkspacesOptions{UserID: user.ID})
+
+	workspaces, err := s.GetWorkspaces(orgID, options)
 	if err != nil {
 		return nil, breverrors.WrapAndTrace(err)
 	}

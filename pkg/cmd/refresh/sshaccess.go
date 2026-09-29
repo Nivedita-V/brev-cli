@@ -25,13 +25,15 @@ type environmentSSHClient interface {
 
 type workspaceSSHStore struct {
 	RefreshStore
-	// user is the refresh's already-resolved current user. When set, the
-	// per-workspace enrichment does not fetch it again.
+	// org and user are the refresh's already-resolved identity. When both are
+	// set, neither the workspace listing nor the per-workspace enrichment
+	// resolves them again.
+	org  *entity.Organization
 	user *entity.User
 }
 
 func (s workspaceSSHStore) GetContextWorkspaces() ([]entity.Workspace, error) {
-	workspaces, err := s.RefreshStore.GetContextWorkspaces()
+	workspaces, err := s.contextWorkspaces()
 	if err != nil {
 		return nil, breverrors.WrapAndTrace(err)
 	}
@@ -51,6 +53,24 @@ func (s workspaceSSHStore) GetContextWorkspaces() ([]entity.Workspace, error) {
 	defer cancel()
 
 	return enrichWorkspacesWithSSHAccess(ctx, client, user.ID, workspaces), nil
+}
+
+// contextWorkspaces lists the workspaces for this refresh, reusing the identity
+// it already resolved instead of looking it up again inside the store.
+func (s workspaceSSHStore) contextWorkspaces() ([]entity.Workspace, error) {
+	if s.org != nil && s.user != nil {
+		workspaces, err := s.GetContextWorkspacesFor(s.org.ID, s.user.ID)
+		if err != nil {
+			return nil, breverrors.WrapAndTrace(err)
+		}
+		return workspaces, nil
+	}
+
+	workspaces, err := s.RefreshStore.GetContextWorkspaces()
+	if err != nil {
+		return nil, breverrors.WrapAndTrace(err)
+	}
+	return workspaces, nil
 }
 
 func enrichWorkspacesWithSSHAccess(ctx context.Context, client environmentSSHClient, userID string, workspaces []entity.Workspace) []entity.Workspace {

@@ -31,6 +31,9 @@ type RefreshStore interface {
 	GetCurrentUser() (*entity.User, error)
 	GetCurrentUserKeys() (*entity.UserKeys, error)
 	GetActiveOrganizationOrDefault() (*entity.Organization, error)
+	// GetContextWorkspacesFor lists the workspaces of the given org and user
+	// without resolving them again.
+	GetContextWorkspacesFor(orgID string, userID string) ([]entity.Workspace, error)
 	GetAccessToken() (string, error)
 	Chmod(string, fs.FileMode) error
 	MkdirAll(string, fs.FileMode) error
@@ -139,7 +142,7 @@ func GetConfigUpdater(store RefreshStore) (*ssh.ConfigUpdater, error) {
 	identity := resolveRefreshIdentity(store)
 
 	cu := ssh.NewConfigUpdater(
-		workspaceSSHStore{RefreshStore: store, user: identity.user},
+		workspaceSSHStore{RefreshStore: store, org: identity.org, user: identity.user},
 		configs,
 		keys.PrivateKey,
 	)
